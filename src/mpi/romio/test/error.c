@@ -33,7 +33,6 @@ int main(int argc, char **argv)
     int errs = 0;
     char *filename, *tmp;
     MPI_File fh;
-    char string[MPI_MAX_ERROR_STRING];
 
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -82,10 +81,12 @@ int main(int argc, char **argv)
     /* consulting error class should be more general than looking for specific strings */
     if (err != MPI_SUCCESS) {
         if (!rank) {
-            int errorclass;
+            char string[MPI_MAX_ERROR_STRING];
 #if VERBOSE
+            MPI_Error_string(err, string, &len);
             fprintf(stderr, "%s\n", string);
 #else
+            int errorclass;
             /* expecting error class MPI_ERR_ARG */
             MPI_Error_class(err, &errorclass);
             if (errorclass != MPI_ERR_ARG) {
