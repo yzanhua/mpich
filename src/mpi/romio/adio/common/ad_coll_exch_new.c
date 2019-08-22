@@ -80,7 +80,7 @@ void ADIOI_Exch_file_views(int myrank, int nprocs, int file_ptr_type,
     MPI_Request *send_req_arr = NULL, *recv_req_arr = NULL;
     MPI_Status *statuses = NULL;
     ADIO_Offset disp_off_sz_ext_typesz[6];
-    MPI_Aint lb, memtype_extent, filetype_extent;
+    MPI_Aint memtype_extent, filetype_extent, lb;
     int ret = -1;
 
     /* parameters for datatypes */

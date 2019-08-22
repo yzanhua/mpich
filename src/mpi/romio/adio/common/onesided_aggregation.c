@@ -1646,6 +1646,7 @@ void ADIOI_OneSidedReadAggregation(ADIO_File fd,
     if (!bufTypeIsContig) {
         /* Flatten the non-contiguous source datatype.
          */
+        MPI_Aint lb;
         flatBuf = ADIOI_Flatten_and_find(datatype);
         MPI_Type_get_extent(datatype, &lb, &bufTypeExtent);
 #ifdef onesidedtrace
