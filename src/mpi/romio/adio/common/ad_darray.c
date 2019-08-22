@@ -6,22 +6,22 @@
 #include "adio.h"
 #include "adio_extern.h"
 
-static int MPIOI_Type_block(int *array_of_gsizes, int dim, int ndims, int nprocs,
+static int MPIOI_Type_block(const int *array_of_gsizes, int dim, int ndims, int nprocs,
                             int rank, int darg, int order, MPI_Aint orig_extent,
                             MPI_Datatype type_old, MPI_Datatype * type_new, MPI_Aint * st_offset);
-static int MPIOI_Type_cyclic(int *array_of_gsizes, int dim, int ndims, int nprocs,
+static int MPIOI_Type_cyclic(const int *array_of_gsizes, int dim, int ndims, int nprocs,
                              int rank, int darg, int order, MPI_Aint orig_extent,
                              MPI_Datatype type_old, MPI_Datatype * type_new, MPI_Aint * st_offset);
 
 
 int ADIO_Type_create_darray(int size, int rank, int ndims,
-                            int *array_of_gsizes, int *array_of_distribs,
-                            int *array_of_dargs, int *array_of_psizes,
+                            const int *array_of_gsizes, const int *array_of_distribs,
+                            const int *array_of_dargs, const int *array_of_psizes,
                             int order, MPI_Datatype oldtype, MPI_Datatype * newtype)
 {
-    MPI_Datatype type_old, type_new = MPI_DATATYPE_NULL, types[1];
-    int procs, tmp_rank, i, tmp_size, blklens[1], *coords;
-    MPI_Aint *st_offsets, lb, ub, orig_extent, disps[1];
+    MPI_Datatype type_old, type_new = MPI_DATATYPE_NULL, tmp_type;
+    int procs, tmp_rank, i, tmp_size, blklen, *coords;
+    MPI_Aint lb, *st_offsets, orig_extent, disp, extent;
 
     MPI_Type_get_extent(oldtype, &lb, &orig_extent);
 
@@ -68,11 +68,11 @@ int ADIO_Type_create_darray(int size, int rank, int ndims,
         }
 
         /* add displacement and UB */
-        disps[0] = st_offsets[0];
+        disp = st_offsets[0];
         tmp_size = 1;
         for (i = 1; i < ndims; i++) {
             tmp_size *= array_of_gsizes[i - 1];
-            disps[0] += (MPI_Aint) tmp_size *st_offsets[i];
+            disp += (MPI_Aint) tmp_size *st_offsets[i];
         }
         /* rest done below for both Fortran and C order */
     }
@@ -106,29 +106,27 @@ int ADIO_Type_create_darray(int size, int rank, int ndims,
         }
 
         /* add displacement and UB */
-        disps[0] = st_offsets[ndims - 1];
+        disp = st_offsets[ndims - 1];
         tmp_size = 1;
         for (i = ndims - 2; i >= 0; i--) {
             tmp_size *= array_of_gsizes[i + 1];
-            disps[0] += (MPI_Aint) tmp_size *st_offsets[i];
+            disp += (MPI_Aint) tmp_size *st_offsets[i];
         }
     }
 
-    disps[0] *= orig_extent;
+    disp *= orig_extent;
 
-    lb = 0;
-    ub = orig_extent;
+    extent = orig_extent;
     for (i = 0; i < ndims; i++)
-        ub *= (MPI_Aint) array_of_gsizes[i];
+        extent *= (MPI_Aint) array_of_gsizes[i];
 
-    blklens[0] = 1;
-    types[0] = type_new;
+    blklen = 1;
 
-    MPI_Type_create_struct(1, blklens, disps, types, &type_old);
-    MPI_Type_create_resized(type_old, lb, ub, newtype);
-
-    MPI_Type_free(&type_old);
+    MPI_Type_create_struct(1, &blklen, &disp, &type_new, &tmp_type);
     MPI_Type_free(&type_new);
+
+    MPI_Type_create_resized(tmp_type, 0, extent, newtype);
+    MPI_Type_free(&tmp_type);
 
     ADIOI_Free(st_offsets);
     ADIOI_Free(coords);
@@ -139,7 +137,7 @@ int ADIO_Type_create_darray(int size, int rank, int ndims,
 /* Returns MPI_SUCCESS on success, an MPI error code on failure.  Code above
  * needs to call MPIO_Err_return_xxx.
  */
-static int MPIOI_Type_block(int *array_of_gsizes, int dim, int ndims, int nprocs,
+static int MPIOI_Type_block(const int *array_of_gsizes, int dim, int ndims, int nprocs,
                             int rank, int darg, int order, MPI_Aint orig_extent,
                             MPI_Datatype type_old, MPI_Datatype * type_new, MPI_Aint * st_offset)
 {
@@ -210,7 +208,7 @@ static int MPIOI_Type_block(int *array_of_gsizes, int dim, int ndims, int nprocs
 /* Returns MPI_SUCCESS on success, an MPI error code on failure.  Code above
  * needs to call MPIO_Err_return_xxx.
  */
-static int MPIOI_Type_cyclic(int *array_of_gsizes, int dim, int ndims, int nprocs,
+static int MPIOI_Type_cyclic(const int *array_of_gsizes, int dim, int ndims, int nprocs,
                              int rank, int darg, int order, MPI_Aint orig_extent,
                              MPI_Datatype type_old, MPI_Datatype * type_new, MPI_Aint * st_offset)
 {
@@ -276,18 +274,18 @@ static int MPIOI_Type_cyclic(int *array_of_gsizes, int dim, int ndims, int nproc
      * dimension correctly. */
     if (((order == MPI_ORDER_FORTRAN) && (dim == 0)) ||
         ((order == MPI_ORDER_C) && (dim == ndims - 1))) {
-        MPI_Datatype tmp;
-        MPI_Aint lb, ub;
+        MPI_Aint extent;
+
+        extent = orig_extent * (MPI_Aint) array_of_gsizes[dim];
         types[0] = *type_new;
-        disps[0] = (MPI_Aint) rank *(MPI_Aint) blksize *orig_extent;
-        lb = 0;
-        ub = orig_extent * (MPI_Aint) array_of_gsizes[dim];
         blklens[0] = 1;
-        MPI_Type_create_struct(1, blklens, disps, types, &tmp);
-        MPI_Type_create_resized(tmp, lb, ub, &type_tmp);
-        MPI_Type_free(&tmp);
+        disps[0] = (MPI_Aint) rank *(MPI_Aint) blksize *orig_extent;
+
+        MPI_Type_create_struct(1, blklens, disps, types, &type_tmp);
         MPI_Type_free(type_new);
-        *type_new = type_tmp;
+
+        MPI_Type_create_resized(type_tmp, 0, extent, type_new);
+        MPI_Type_free(&type_tmp);
 
         *st_offset = 0; /* set it to 0 because it is taken care of in
                          * the struct above */
