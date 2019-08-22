@@ -803,7 +803,7 @@ int MPIOI_File_write_all_begin(MPI_File fh, MPI_Offset offset, int file_ptr_type
                                MPI_Aint count, MPI_Datatype datatype, char *myname);
 int MPIOI_File_read_all_end(MPI_File fh, void *buf, char *myname, MPI_Status * status);
 int MPIOI_File_write_all_end(MPI_File fh, const void *buf, char *myname, MPI_Status * status);
-int MPIOI_File_iwrite(MPI_File fh,
+int MPIOI_File_iwrite(ADIO_File adio_fh,
                       MPI_Offset offset,
                       int file_ptr_type,
                       const void *buf,
@@ -813,7 +813,7 @@ int MPIOI_File_iread(MPI_File fh,
                      int file_ptr_type,
                      void *buf,
                      MPI_Aint count, MPI_Datatype datatype, char *myname, MPI_Request * request);
-int MPIOI_File_iwrite_all(MPI_File fh,
+int MPIOI_File_iwrite_all(ADIO_File adio_fh,
                           MPI_Offset offset,
                           int file_ptr_type,
                           const void *buf,
@@ -1049,6 +1049,23 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 
 #endif
 
+#ifdef ROMIO_INSIDE_MPICH
+/* only built within MPI requires MPL */
 #include "mpl.h"
+#else
+#define MPL_UNREFERENCED_ARG(a)
+#define MPL_FALLTHROUGH
+#define MPL_MAX(a,b)    (((a) > (b)) ? (a) : (b))
+#define MPL_MIN(a,b)    (((a) < (b)) ? (a) : (b))
+#define MPL_malloc(a,b)    malloc((size_t)(a))
+#define MPL_calloc(a,b,c)  calloc((size_t)(a),(size_t)(b))
+#define MPL_free(a)      free((void *)(a))
+#define MPL_realloc(a,b,c)  realloc((void *)(a),(size_t)(b))
+#define MPL_VG_MEM_INIT(addr_,len_)  do {} while (0)
+extern void MPL_create_pathname(char *dest_filename, const char *dirname,
+                                const char *prefix, const int is_dir);
+extern int MPL_strnapp(char *dest, const char *src, size_t n);
+extern int MPL_snprintf(char *str, size_t size, const char *format, ...);
+#endif
 
 #endif /* ADIOI_H_INCLUDED */
