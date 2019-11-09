@@ -5,7 +5,8 @@
 
 #include "adio.h"
 
-#if defined(MPICH)
+#if defined(ROMIO_INSIDE_MPICH) || defined(HAVE_MPIR_DATATYPE_ISCONTIG)
+
 /* MPICH also provides this routine */
 void MPIR_Datatype_iscontig(MPI_Datatype datatype, int *flag);
 
@@ -51,7 +52,7 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
     *flag = MPI_SGI_type_is_contig(datatype) && (displacement == 0);
 }
 
-#elif defined(OMPI_BUILDING) && OMPI_BUILDING
+#elif defined(ROMIO_INSIDE_OMPI)
 
 /* void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag) is defined
  * and implemented in OpenMPI itself */
@@ -73,7 +74,7 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
 #endif
         case MPI_COMBINER_CONTIGUOUS:
             {
-                int *ints;
+                int i, *ints;
                 MPI_Aint *adds;
                 MPI_Count *cnts;
                 MPI_Datatype *types;
@@ -94,8 +95,19 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
 #else
                 MPI_Type_get_contents(datatype, nints, nadds, ntypes, ints, adds, types);
 #endif
-                ADIOI_Datatype_iscontig(types[0], flag);
+                if (ints[0] == 0)   /* zero-size datatype */
+                    *flag = 1;
+                else if (combiner == MPI_COMBINER_CONTIGUOUS)
+                    ADIOI_Datatype_iscontig(types[0], flag);
+                else
+                    *flag = 0;
 
+                for (i = 0; i < ntypes; i++) {
+                    int ni, na, nt, cb;
+                    MPI_Type_get_envelope(types[i], &ni, &na, &nt, &cb);
+                    if (cb != MPI_COMBINER_NAMED)
+                        MPI_Type_free(types + i);
+                }
                 ADIOI_Type_dispose(types);
                 ADIOI_Free(ints);
                 ADIOI_Free(adds);
@@ -111,8 +123,5 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
             *flag = 0;
             break;
     }
-
-    /* This function needs more work. It should check for contiguity
-     * in other cases as well. */
 }
 #endif
