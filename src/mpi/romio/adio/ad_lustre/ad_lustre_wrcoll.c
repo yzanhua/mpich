@@ -214,7 +214,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, int count,
     /* Get Lustre hints information */
     ADIOI_LUSTRE_Get_striping_info(fd, striping_info, 1);
 
-    if ((romio_write_aggmethod == 1) || (romio_write_aggmethod == 2)) {
+    if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
         /* If user has specified to use a one-sided aggregation method then do
          * that at this point instead of using the traditional MPI
          * point-to-point communication, i.e. MPI_Isend and MPI_Irecv.
