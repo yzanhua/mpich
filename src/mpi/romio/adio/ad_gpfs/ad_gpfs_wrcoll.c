@@ -435,6 +435,18 @@ void ADIOI_GPFS_WriteStridedColl(ADIO_File fd, const void *buf, int count,
 
     GPFSMPIO_T_CIO_SET_GET(w, 1, 1, GPFSMPIO_CIO_T_DEXCH, GPFSMPIO_CIO_T_OTHREQ);
 
+    ADIOI_Free(count_my_req_per_proc);
+    if (gpfsmpio_tuneblocking) {
+        for ( i = 0; i < nprocs; ++i ) {
+            if ( my_req[i].count ) {
+                ADIOI_Free(my_req[i].offsets);
+            }
+        }
+    } else {
+        ADIOI_Free(my_req[0].offsets);
+    }
+    ADIOI_Free(my_req);
+
     /* exchange data and write in sizes of no more than coll_bufsize. */
     ADIOI_Exch_and_write(fd, buf, datatype, nprocs, myrank,
                          others_req, offset_list,
