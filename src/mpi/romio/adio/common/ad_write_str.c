@@ -43,7 +43,7 @@
             ADIO_WriteContig(fd, writebuf, writebuf_len, MPI_BYTE,      \
                              ADIO_EXPLICIT_OFFSET, writebuf_off, &status1, error_code); \
             if (!fd->atomicity && fd->hints->ds_write == ADIOI_HINT_DISABLE) \
-                ADIOI_WRITE_LOCK(fd, writebuf_off, SEEK_SET, writebuf_len); \
+                ADIOI_UNLOCK(fd, writebuf_off, SEEK_SET, writebuf_len); \
             if (*error_code != MPI_SUCCESS) {                           \
                 *error_code = MPIO_Err_create_code(*error_code,         \
                                                    MPIR_ERR_RECOVERABLE, myname, \
