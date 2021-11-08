@@ -122,7 +122,7 @@ int MPI_File_iread_c(MPI_File fh, void *buf, MPI_Count count, MPI_Datatype datat
                                   buf, count, datatype, myname, request);
 
     /* --BEGIN ERROR HANDLING-- */
-    if (error_code != MPI_SUCCESS)
+    if (error_code != MPI_SUCCESS) {
         ADIO_File adio_fh = MPIO_File_resolve(fh);
         error_code = MPIO_Err_return_file(adio_fh, error_code);
     }

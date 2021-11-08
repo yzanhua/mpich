@@ -606,7 +606,6 @@ static void ADIOI_Iexch_and_write(ADIOI_NBC_Request * nbc_req, int *error_code)
      * at least another 8Mbytes of temp space is unacceptable. */
 
     int i, j;
-    MPI_Aint lb;
     ADIO_Offset st_loc = -1, end_loc = -1;
     int info_flag;
     MPI_Aint coll_bufsize;

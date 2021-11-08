@@ -67,4 +67,11 @@ void MPIR_MPIOInit(int *error_code);
 #include "mpioinst.h"
 #endif /* MPI_hpux */
 
+#ifndef true
+#define true 1
+#endif
+#ifndef false
+#define false 0
+#endif
+
 #endif /* MPIOIMPL_H_INCLUDED */

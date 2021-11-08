@@ -5,16 +5,16 @@
 
 if ROMIO_INSIDE_OMPI
 AM_CPPFLAGS = \
-        -I@master_top_srcdir@ \
-        -I@master_top_srcdir@/opal/include \
-        -I@master_top_builddir@/opal/include \
-        -I@master_top_builddir@/ompi/include \
+        -I@main_top_srcdir@ \
+        -I@main_top_srcdir@/opal/include \
+        -I@main_top_builddir@/opal/include \
+        -I@main_top_builddir@/ompi/include \
         -I$(top_srcdir)/include \
         -I$(top_srcdir)/adio/include
 else
 if ROMIO_INSIDE_MPICH
 # when building under MPICH we must be able to find mpi.h
-AM_CPPFLAGS = -I@MPI_INCLUDE_DIR@
+AM_CPPFLAGS = -I@main_top_builddir@/src/include -I@main_top_srcdir@/src/include
 else
 AM_CPPFLAGS =
 endif

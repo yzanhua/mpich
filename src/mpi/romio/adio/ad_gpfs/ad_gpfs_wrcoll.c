@@ -438,8 +438,8 @@ void ADIOI_GPFS_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count,
 
     ADIOI_Free(count_my_req_per_proc);
     if (gpfsmpio_tuneblocking) {
-        for ( i = 0; i < nprocs; ++i ) {
-            if ( my_req[i].count ) {
+        for (i = 0; i < nprocs; ++i) {
+            if (my_req[i].count) {
                 ADIOI_Free(my_req[i].offsets);
             }
         }

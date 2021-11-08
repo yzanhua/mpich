@@ -84,7 +84,10 @@ AH_TOP([/*
  */
 #ifndef ROMIOCONF_H_INCLUDED
 #define ROMIOCONF_H_INCLUDED
+#include "nopackage.h"
+#ifdef BUILD_ROMIO_EMBEDDED
 #include <mplconfig.h>
+#endif
 ])
 AH_BOTTOM([
 #ifdef BUILD_ROMIO_EMBEDDED
@@ -1557,7 +1560,8 @@ elif test $FROM_MPICH = yes ; then
    ROMIO_INCLUDE=""
    USER_CFLAGS=""
    USER_FFLAGS=""
-   MPI_CPPFLAGS="-I$MPI_INCLUDE_DIR"
+   MPI_INCLUDE_DIR="${main_topbuild_dir}/src/include"
+   MPI_CPPFLAGS="-I$MPI_INCLUDE_DIR -I${main_top_srcdir}/src/include"
    MPI_LIB_DIR="${main_topbuild_dir}/src/lib"
    MPI_LDFLAGS="-L$MPI_LIB_DIR"
    MPI_LIB="-lmpi"
@@ -1720,7 +1724,7 @@ if test "x$build_ROMIO_EMBEDDED" = xno; then
    fi
 
    AC_CHECK_TYPE([MPI_Datarep_conversion_function],
-                 [AC_DEFINE([HAVE_MPI_DATAREP_FUNCTIONS],[1],
+                 [AC_DEFINE([HAVE_MPI_DATAREP_CONVERSION_FUNCTION],[1],
                             [whether MPI_Datarep_conversion_function is defined])],
                  [], [[#include <mpi.h>]])
 
@@ -1729,10 +1733,17 @@ if test "x$build_ROMIO_EMBEDDED" = xno; then
                             [whether MPI_Datarep_extent_function is defined])],
                  [], [[#include <mpi.h>]])
 
+   AC_CHECK_TYPE([MPI_Datarep_conversion_function_c],
+                 [AC_DEFINE([HAVE_MPI_DATAREP_CONVERSION_FUNCTION_C],[1],
+                            [whether MPI_Datarep_conversion_function_c is defined])],
+                 [], [[#include <mpi.h>]])
+
    AC_CHECK_TYPE([MPIX_Grequest_class],
                  [AC_DEFINE([HAVE_MPIX_GREQUEST_CLASS],[1],
                             [whether MPI extended general request is enabled])],
                  [], [[#include <mpi.h>]])
+
+   AC_CHECK_DECLS([MPI_ERRORS_ABORT], [], [], [[#include <mpi.h>]])
 
    AC_CHECK_DECLS([MPI_FILE_NULL], [], [], [[#include <mpi.h>]])
 
