@@ -538,7 +538,6 @@ static void ADIOI_GEN_IreadStridedColl_fini(ADIOI_NBC_Request * nbc_req, int *er
 
 static void ADIOI_Iread_and_exch(ADIOI_NBC_Request * nbc_req, int *error_code)
 {
-    MPI_Aint lb;
     ADIOI_Iread_and_exch_vars *vars = nbc_req->data.rd.rae_vars;
     ADIO_File fd = vars->fd;
     MPI_Datatype datatype = vars->datatype;
