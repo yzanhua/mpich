@@ -74,7 +74,7 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
 #endif
         case MPI_COMBINER_CONTIGUOUS:
             {
-                int i, *ints;
+                int *ints;
                 MPI_Aint *adds;
                 MPI_Count *cnts;
                 MPI_Datatype *types;
@@ -95,22 +95,12 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
 #else
                 MPI_Type_get_contents(datatype, nints, nadds, ntypes, ints, adds, types);
 #endif
-                if (ints[0] == 0)   /* zero-size datatype */
-                    *flag = 1;
-                else if (combiner == MPI_COMBINER_CONTIGUOUS)
-                    ADIOI_Datatype_iscontig(types[0], flag);
-                else
-                    *flag = 0;
+                ADIOI_Datatype_iscontig(types[0], flag);
 
-                for (i = 0; i < ntypes; i++) {
-                    int ni, na, nt, cb;
-                    MPI_Type_get_envelope(types[i], &ni, &na, &nt, &cb);
-                    if (cb != MPI_COMBINER_NAMED)
-                        MPI_Type_free(types + i);
-                }
                 ADIOI_Type_dispose(types);
                 ADIOI_Free(ints);
                 ADIOI_Free(adds);
+                ADIOI_Free(cnts);
                 ADIOI_Free(types);
             }
             break;
@@ -123,5 +113,8 @@ void ADIOI_Datatype_iscontig(MPI_Datatype datatype, int *flag)
             *flag = 0;
             break;
     }
+
+    /* This function needs more work. It should check for contiguity
+     * in other cases as well. */
 }
 #endif
