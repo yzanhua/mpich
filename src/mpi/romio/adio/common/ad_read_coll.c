@@ -615,7 +615,7 @@ static void ADIOI_Read_and_exch(ADIO_File fd, void *buf, MPI_Datatype
          * req_size = size corresponding to req_off */
 
         size = MPL_MIN(coll_bufsize, end_loc - st_loc + 1 - done);
-        bool flag = false;
+        int flag = 0;
         for (i = 0; i < nprocs; i++) {
             if (others_req[i].count) {
                 for (j = curr_offlen_ptr[i]; j < others_req[i].count; j++) {
@@ -626,7 +626,7 @@ static void ADIOI_Read_and_exch(ADIO_File fd, void *buf, MPI_Datatype
                         req_off = others_req[i].offsets[j];
                     }
                     if (req_off < off + size) {
-                        flag = true;
+                        flag = 1;
                     }
                 }
             }
