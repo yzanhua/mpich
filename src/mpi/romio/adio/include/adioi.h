@@ -1077,7 +1077,13 @@ ssize_t pwrite(int fd, const void *buf, size_t count, off_t offset);
 extern void MPL_create_pathname(char *dest_filename, const char *dirname,
                                 const char *prefix, const int is_dir);
 extern int MPL_strnapp(char *dest, const char *src, size_t n);
+#ifdef HAVE_SNPRINTF
+#ifndef MPL_snprintf
+#define MPL_snprintf snprintf
+#endif
+#else
 extern int MPL_snprintf(char *str, size_t size, const char *format, ...);
+#endif
 #endif
 
 #endif /* ADIOI_H_INCLUDED */

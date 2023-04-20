@@ -1529,7 +1529,7 @@ if test $FROM_OMPI = yes ; then
    DEFINE_HAVE_MPI_GREQUEST="#define HAVE_MPI_GREQUEST 1"
 
    AC_ARG_ENABLE([grequest-extensions],
-       [AC_HELP_STRING([--enable-grequest-extensions],
+       [AS_HELP_STRING([--enable-grequest-extensions],
                        [Enable support for Grequest extensions (default: disabled)])])
    AS_IF([test "x$enable_grequest_extensions" = "xyes"],
          [DEFINE_HAVE_MPI_GREQUEST_EXTENSIONS="#include \"ompi_grequestx.h\""],
@@ -1798,6 +1798,9 @@ if test "x$build_ROMIO_EMBEDDED" = xno; then
    fi
 
    AC_CHECK_FUNCS(strncat)
+
+   # Use snprintf if possible when creating messages
+   AC_CHECK_FUNCS(snprintf)
 
    AC_TYPE_UINTPTR_T
 fi

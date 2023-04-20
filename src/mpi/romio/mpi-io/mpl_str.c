@@ -11,6 +11,9 @@
 #include <ctype.h>      /* isdigit() */
 #include <assert.h>
 
+#ifdef HAVE_SNPRINTF
+#define MPL_snprintf snprintf
+#else
 #ifndef HAVE_MPL_SNPRINTF
 int MPL_snprintf(char *str, size_t size, const char *format, ...)
 {
@@ -154,6 +157,7 @@ int MPL_snprintf(char *str, size_t size, const char *format, ...)
     n = (int) (out_str - str);
     return n;
 }
+#endif
 #endif
 
 #ifndef HAVE_MPL_CREATE_PATHNAME
