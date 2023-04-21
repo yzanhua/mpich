@@ -1,4 +1,3 @@
-/* -*- Mode: C; c-basic-offset:4 ; indent-tabs-mode:nil ; -*- */
 /*
  *  (C) 2001 by Argonne National Laboratory.
  *      See COPYRIGHT in top-level directory.
@@ -151,8 +150,15 @@ int MPL_snprintf(char *str, size_t size, const char *format, ...)
 
     va_end(list);
 
+    /* Extract from snprintf man page:
+      These functions return the number of characters printed (not including
+      the trailing `\0' used to end output to strings), except for snprintf()
+      and vsnprintf(), which return the number of characters that would have
+      been printed if the size were unlimited (again, not including the final
+      `\0').  These functions return a negative value if an error occurs.
+    */
     if (size-- > 0)
-        *out_str++ = '\0';
+        *out_str = '\0';
 
     n = (int) (out_str - str);
     return n;

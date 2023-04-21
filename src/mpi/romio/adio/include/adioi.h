@@ -41,6 +41,7 @@ struct ADIOI_Hints_struct {
     int cb_alltoall;
     int ds_read;
     int ds_write;
+    int ds_wr_lb;
     int no_indep_rw;
     int ind_rd_buffer_size;
     int ind_wr_buffer_size;
@@ -276,7 +277,13 @@ struct ADIOI_Fns_struct {
 #define ADIOI_IND_WR_BUFFER_SIZE_DFLT     "524288"
     /* use one process per processor name by default */
 #define ADIOI_CB_CONFIG_LIST_DFLT "*:1"
-
+    /* lower bound of number of noncontiguous offset-length pairs to force data
+     * sieving write. If the number of offset-length pairs is more than hint
+     * romio_cb_wr_lb, then checking holes in the file domains is skipped.
+     * Checking holes can be expensive, as it requires to merge-sort all the
+     * offset-length pairs.
+     */
+#define ADIOI_DS_WR_LB_DFLT "65536"
 
 /* some of the ADIO functions are macro-replaced */
 
@@ -779,7 +786,16 @@ int ADIOI_Type_create_hindexed_x(int count,
                                  const MPI_Count array_of_blocklengths[],
                                  const MPI_Aint array_of_displacements[],
                                  MPI_Datatype oldtype, MPI_Datatype * newtype);
-
+void ADIOI_Fill_send_buffer(ADIO_File fd, void *buf, ADIOI_Flatlist_node
+                            * flat_buf, char **send_buf, ADIO_Offset
+                            * offset_list, ADIO_Offset * len_list, int *send_size,
+                            MPI_Request * requests, int *sent_to_proc,
+                            int nprocs, int myrank,
+                            int contig_access_count,
+                            ADIO_Offset min_st_offset, ADIO_Offset fd_size,
+                            ADIO_Offset * fd_start, ADIO_Offset * fd_end,
+                            int *send_buf_idx, int *curr_to_proc,
+                            int *done_to_proc, int iter, MPI_Aint buftype_extent);
 
 int ADIOI_FAKE_IODone(ADIO_Request * request, ADIO_Status * status, int *error_code);
 void ADIOI_FAKE_IreadContig(ADIO_File fd, void *buf, MPI_Aint count,

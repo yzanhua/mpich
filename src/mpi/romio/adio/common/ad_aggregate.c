@@ -496,14 +496,19 @@ void ADIOI_Calc_others_req(ADIO_File fd, int count_my_req_procs,
 
     j = 0;
     for (i = 0; i < nprocs; i++) {
-        if (others_req[i].count) {
+        if (others_req[i].count == 0)
+            continue;
+        if (i == myrank)
+            /* send to self uses memcpy()C, here others_req[i].count == my_req[i].count */
+            memcpy(others_req[i].offsets, my_req[i].offsets,
+                   2 * my_req[i].count * sizeof(ADIO_Offset));
+        else
             MPI_Irecv(others_req[i].offsets, 2 * others_req[i].count,
                       ADIO_OFFSET, i, i + myrank, fd->comm, &requests[j++]);
-        }
     }
 
     for (i = 0; i < nprocs; i++) {
-        if (my_req[i].count) {
+        if (my_req[i].count && i != myrank) {
             MPI_Isend(my_req[i].offsets, 2 * my_req[i].count,
                       ADIO_OFFSET, i, i + myrank, fd->comm, &requests[j++]);
         }

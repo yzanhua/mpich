@@ -14,7 +14,7 @@ void ADIOI_LUSTRE_lock_ahead_ioctl(ADIO_File fd,
 
 /* Handle lock ahead.  If this write is outside our locked region, lock it now */
 #define ADIOI_LUSTRE_WR_LOCK_AHEAD(fd,cb_nodes,offset,error_code)           \
-if (fd->hints->fs_hints.lustre.lock_ahead_write) {                           \
+if (fd->hints->fs_hints.lustre.lock_ahead_write) {                          \
     if (offset > fd->hints->fs_hints.lustre.lock_ahead_end_extent) {        \
         ADIOI_LUSTRE_lock_ahead_ioctl(fd, cb_nodes, offset, error_code);    \
     }                                                                       \
@@ -24,7 +24,6 @@ if (fd->hints->fs_hints.lustre.lock_ahead_write) {                           \
 }
 #else
 #define ADIOI_LUSTRE_WR_LOCK_AHEAD(fd,cb_nodes,offset,error_code)
-
 #endif
 
 
@@ -36,6 +35,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
                                         ADIOI_Access * my_req,
                                         ADIO_Offset * offset_list,
                                         ADIO_Offset * len_list,
+                                        ADIO_Offset min_st_loc, ADIO_Offset max_end_loc,
                                         int contig_access_count,
                                         int *striping_info,
                                         ADIO_Offset ** buf_idx, int *error_code);
@@ -56,8 +56,8 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          ADIOI_Flatlist_node * flat_buf,
                                          ADIO_Offset * offset_list,
                                          ADIO_Offset * len_list, int *send_size,
-                                         int *recv_size, ADIO_Offset off,
-                                         int size, int *count,
+                                         int *recv_size, ADIO_Offset real_off,
+                                         int real_size, int *count,
                                          int *start_pos,
                                          int *sent_to_proc, int nprocs,
                                          int myrank, int buftype_is_contig,
@@ -66,7 +66,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          ADIOI_Access * others_req,
                                          ADIO_Offset * send_buf_idx,
                                          int *curr_to_proc,
-                                         int *done_to_proc, int *hole,
+                                         int *done_to_proc,
                                          int iter, MPI_Aint buftype_extent,
                                          ADIO_Offset * buf_idx,
                                          ADIO_Offset ** srt_off, int **srt_len, int *srt_num,
@@ -88,239 +88,205 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
                                    int file_ptr_type, ADIO_Offset offset,
                                    ADIO_Status * status, int *error_code)
 {
-    /* Uses a generalized version of the extended two-phase method described
-     * in "An Extended Two-Phase Method for Accessing Sections of
-     * Out-of-Core Arrays", Rajeev Thakur and Alok Choudhary,
-     * Scientific Programming, (5)4:301--317, Winter 1996.
+    /* Uses a generalized version of the extended two-phase method described in
+     * "An Extended Two-Phase Method for Accessing Sections of Out-of-Core
+     * Arrays", Rajeev Thakur and Alok Choudhary, Scientific Programming,
+     * (5)4:301--317, Winter 1996.
      * http://www.mcs.anl.gov/home/thakur/ext2ph.ps
      */
 
-    ADIOI_Access *my_req;
-    /* array of nprocs access structures, one for each other process has
-     * this process's request */
-
-    ADIOI_Access *others_req;
-    /* array of nprocs access structures, one for each other process
-     * whose request is written by this process. */
-
-    int i, filetype_is_contig, nprocs, myrank, do_collect = 0;
-    int contig_access_count = 0, buftype_is_contig, interleave_count = 0;
-    int *count_my_req_per_proc, count_my_req_procs;
-    int *count_others_req_per_proc, count_others_req_procs;
-    ADIO_Offset orig_fp, start_offset, end_offset, off;
-    ADIO_Offset *offset_list = NULL, *st_offsets = NULL, *end_offsets = NULL;
-    ADIO_Offset *len_list = NULL;
-    int striping_info[3];
-    ADIO_Offset **buf_idx = NULL;
-    int old_error, tmp_error;
-    ADIO_Offset *lustre_offsets0, *lustre_offsets, *count_sizes = NULL;
+    int i, nprocs, nonzero_nprocs, myrank, old_error, tmp_error;
+    int striping_info[3], do_collect = 0, contig_access_count = 0;
+    ADIO_Offset orig_fp, start_offset, end_offset;
+    ADIO_Offset min_st_loc = -1, max_end_loc = -1;
+    ADIO_Offset *offset_list = NULL, *len_list = NULL;
 
     MPI_Comm_size(fd->comm, &nprocs);
     MPI_Comm_rank(fd->comm, &myrank);
 
     orig_fp = fd->fp_ind;
 
-    /* IO pattern identification if cb_write isn't disabled */
+    /* Check if collective write is actually necessary, if cb_write hint isn't
+     * disabled by users.
+     */
     if (fd->hints->cb_write != ADIOI_HINT_DISABLE) {
-        /* For this process's request, calculate the list of offsets and
-         * lengths in the file and determine the start and end offsets.
+        int is_interleaved;
+        ADIO_Offset st_end[2], *st_end_all = NULL;
+
+        /* Calculate and construct the list of starting file offsets and
+         * lengths of write requests of this process. No inter-process
+         * communication is needed.
+         *
          * Note: end_offset points to the last byte-offset to be accessed.
          * e.g., if start_offset=0 and 100 bytes to be read, end_offset=99
+         * No inter-process communication is needed. If this process has no
+         * data to write, end_offset == (start_offset - 1)
          */
         ADIOI_Calc_my_off_len(fd, count, datatype, file_ptr_type, offset,
                               &offset_list, &len_list, &start_offset,
                               &end_offset, &contig_access_count);
 
-        /* each process communicates its start and end offsets to other
-         * processes. The result is an array each of start and end offsets
-         * stored in order of process rank.
+        /* All processes gather starting and ending file offsets of requests
+         * from all processes into st_end_all[]. Even indices of st_end_all[]
+         * are start offsets, odd indices are end offsets. st_end_all[] is used
+         * below to tell whether access across all process is interleaved.
          */
-        st_offsets = (ADIO_Offset *) ADIOI_Malloc(nprocs * 2 * sizeof(ADIO_Offset));
-        end_offsets = st_offsets + nprocs;
-        ADIO_Offset my_count_size = 0;
-        /* One-sided aggregation needs the amount of data per rank as well
-         * because the difference in starting and ending offsets for 1 byte is
-         * 0 the same as 0 bytes so it cannot be distinguished.
+        st_end[0] = start_offset;
+        st_end[1] = end_offset;
+        st_end_all = (ADIO_Offset *) ADIOI_Malloc(nprocs * 2 * sizeof(ADIO_Offset));
+        MPI_Allgather(st_end, 2, ADIO_OFFSET, st_end_all, 2, ADIO_OFFSET, fd->comm);
+
+        /* Find the starting and ending file offsets of aggregate access region
+         * and the number of processes that have non-zero length write
+         * requests. Also, check whether accesses are interleaved across
+         * processes. Below is a rudimentary check for interleaving, but should
+         * suffice for the moment.
          */
-        if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
-            count_sizes = (ADIO_Offset *) ADIOI_Malloc(nprocs * sizeof(ADIO_Offset));
-            MPI_Count buftype_size;
-            MPI_Type_size_x(datatype, &buftype_size);
-            my_count_size = (ADIO_Offset) count *(ADIO_Offset) buftype_size;
-        }
-        if (fd->romio_tunegather) {
-            if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
-                lustre_offsets0 = (ADIO_Offset *) ADIOI_Malloc(6 * nprocs * sizeof(ADIO_Offset));
-                lustre_offsets = lustre_offsets0 + 3 * nprocs;
-                for (i = 0; i < nprocs; i++) {
-                    lustre_offsets0[i * 3] = 0;
-                    lustre_offsets0[i * 3 + 1] = 0;
-                    lustre_offsets0[i * 3 + 2] = 0;
-                }
-                lustre_offsets0[myrank * 3] = start_offset;
-                lustre_offsets0[myrank * 3 + 1] = end_offset;
-                lustre_offsets0[myrank * 3 + 2] = my_count_size;
-                MPI_Allreduce(lustre_offsets0, lustre_offsets, nprocs * 3, ADIO_OFFSET, MPI_MAX,
-                              fd->comm);
-                for (i = 0; i < nprocs; i++) {
-                    st_offsets[i] = lustre_offsets[i * 3];
-                    end_offsets[i] = lustre_offsets[i * 3 + 1];
-                    count_sizes[i] = lustre_offsets[i * 3 + 2];
-                }
-            } else {
-                lustre_offsets0 = (ADIO_Offset *) ADIOI_Malloc(4 * nprocs * sizeof(ADIO_Offset));
-                lustre_offsets = lustre_offsets0 + 2 * nprocs;
-                for (i = 0; i < nprocs; i++) {
-                    lustre_offsets0[i * 2] = 0;
-                    lustre_offsets0[i * 2 + 1] = 0;
-                }
-                lustre_offsets0[myrank * 2] = start_offset;
-                lustre_offsets0[myrank * 2 + 1] = end_offset;
-
-                MPI_Allreduce(lustre_offsets0, lustre_offsets, nprocs * 2, ADIO_OFFSET, MPI_MAX,
-                              fd->comm);
-
-                for (i = 0; i < nprocs; i++) {
-                    st_offsets[i] = lustre_offsets[i * 2];
-                    end_offsets[i] = lustre_offsets[i * 2 + 1];
-                }
+        is_interleaved = 0;
+        min_st_loc = st_end_all[0];
+        max_end_loc = st_end_all[1];
+        nonzero_nprocs = (st_end_all[0] - 1 == st_end_all[1]) ? 0 : 1;
+        for (i = 2; i < nprocs * 2; i += 2) {
+            if (st_end_all[i] - 1 == st_end_all[i + 1]) {
+                /* process rank (i/2) has no data to write */
+                continue;
             }
-            ADIOI_Free(lustre_offsets0);
-        } else {
-            MPI_Allgather(&start_offset, 1, ADIO_OFFSET, st_offsets, 1, ADIO_OFFSET, fd->comm);
-            MPI_Allgather(&end_offset, 1, ADIO_OFFSET, end_offsets, 1, ADIO_OFFSET, fd->comm);
-            if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
-                MPI_Allgather(&my_count_size, 1, ADIO_OFFSET, count_sizes, 1,
-                              ADIO_OFFSET, fd->comm);
+            if (st_end_all[i] < st_end_all[i - 1]) {
+                /* start offset of process rank (i/2) is less than the end
+                 * offset of process rank (i/2-1)
+                 */
+                is_interleaved = 1;
             }
+            min_st_loc = MPL_MIN(st_end_all[i], min_st_loc);
+            max_end_loc = MPL_MAX(st_end_all[i + 1], max_end_loc);
+            nonzero_nprocs++;
         }
-        /* are the accesses of different processes interleaved? */
-        for (i = 1; i < nprocs; i++)
-            if ((st_offsets[i] < end_offsets[i - 1]) && (st_offsets[i] <= end_offsets[i]))
-                interleave_count++;
-        /* This is a rudimentary check for interleaving, but should suffice
-         * for the moment. */
+        ADIOI_Free(st_end_all);
 
         /* Two typical access patterns can benefit from collective write.
-         *   1) the processes are interleaved, and
-         *   2) the req size is small.
+         *   1) access file regions among all processes are interleaved, and
+         *   2) the individual request sizes are not too big, i.e. no bigger
+         *      than hint coll_threshold.  Large individual requests may cause
+         *      a high communication cost for redistributing requests to the
+         *      I/O aggregators.
          */
-        if (interleave_count > 0) {
+        if (is_interleaved > 0) {
             do_collect = 1;
         } else {
+            /* This ADIOI_LUSTRE_Docollect() calls MPI_Allreduce(), so all
+             * processes must participate.
+             */
             do_collect = ADIOI_LUSTRE_Docollect(fd, contig_access_count, len_list, nprocs);
         }
     }
-    ADIOI_Datatype_iscontig(datatype, &buftype_is_contig);
 
-    /* Decide if collective I/O should be done */
+    /* If collective I/O is not necessary, use independent I/O */
     if ((!do_collect && fd->hints->cb_write == ADIOI_HINT_AUTO) ||
         fd->hints->cb_write == ADIOI_HINT_DISABLE) {
 
-        /* use independent accesses */
-        if (fd->hints->cb_write != ADIOI_HINT_DISABLE) {
+        int buftype_is_contig, filetype_is_contig;
+
+        if (offset_list != NULL)
             ADIOI_Free(offset_list);
-            ADIOI_Free(st_offsets);
-            if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2))
-                ADIOI_Free(count_sizes);
-        }
 
         fd->fp_ind = orig_fp;
+
+        ADIOI_Datatype_iscontig(datatype, &buftype_is_contig);
         ADIOI_Datatype_iscontig(fd->filetype, &filetype_is_contig);
+
         if (buftype_is_contig && filetype_is_contig) {
-            if (file_ptr_type == ADIO_EXPLICIT_OFFSET) {
-                off = fd->disp + (ADIO_Offset) (fd->etype_size) * offset;
-                ADIO_WriteContig(fd, buf, count, datatype,
-                                 ADIO_EXPLICIT_OFFSET, off, status, error_code);
-            } else
-                ADIO_WriteContig(fd, buf, count, datatype, ADIO_INDIVIDUAL, 0, status, error_code);
+            ADIO_Offset off = 0;
+            if (file_ptr_type == ADIO_EXPLICIT_OFFSET)
+                off = fd->disp + offset * fd->etype_size;
+            ADIO_WriteContig(fd, buf, count, datatype, file_ptr_type, off, status, error_code);
         } else {
             ADIO_WriteStrided(fd, buf, count, datatype, file_ptr_type, offset, status, error_code);
         }
         return;
     }
 
-    ADIO_Offset lastFileOffset = 0, firstFileOffset = -1;
-    int currentValidDataIndex = 0;
-    if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
-        /* Take out the 0-data offsets by shifting the indexes with data to the front
-         * and keeping track of the valid data index for use as the length.
-         */
-        for (i = 0; i < nprocs; i++) {
-            if (count_sizes[i] > 0) {
-                st_offsets[currentValidDataIndex] = st_offsets[i];
-                end_offsets[currentValidDataIndex] = end_offsets[i];
-
-                lastFileOffset = MPL_MAX(lastFileOffset, end_offsets[currentValidDataIndex]);
-                if (firstFileOffset == -1)
-                    firstFileOffset = st_offsets[currentValidDataIndex];
-                else
-                    firstFileOffset = MPL_MIN(firstFileOffset, st_offsets[currentValidDataIndex]);
-
-                currentValidDataIndex++;
-            }
-        }
-    }
-
     /* Get Lustre hints information */
     ADIOI_LUSTRE_Get_striping_info(fd, striping_info, 1);
-    /* If the user has specified to use a one-sided aggregation method then do
-     * that at this point instead of the two-phase I/O.
-     */
+
     if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
-
+        /* If user has specified to use a one-sided aggregation method then do
+         * that at this point instead of using the traditional MPI
+         * point-to-point communication, i.e. MPI_Isend and MPI_Irecv.
+         */
         ADIOI_LUSTRE_IterateOneSided(fd, buf, striping_info, offset_list, len_list,
-                                     contig_access_count, currentValidDataIndex, count,
+                                     contig_access_count, nonzero_nprocs, count,
                                      file_ptr_type, offset, start_offset, end_offset,
-                                     firstFileOffset, lastFileOffset, datatype, myrank, error_code);
+                                     min_st_loc, max_end_loc, datatype, myrank, error_code);
+    } else {
+        /* my_req[] is an array of nprocs access structures, one for each other
+         * process whose file domain has this process's request */
+        ADIOI_Access *my_req;
+        int count_my_req_procs, *count_my_req_per_proc;
 
-        ADIOI_Free(offset_list);
-        ADIOI_Free(st_offsets);
-        ADIOI_Free(count_sizes);
-        goto fn_exit;
-    }   // onesided aggregation
+        /* others_req[] is an array of nprocs access structures, one for each
+         * other process whose requests fall into this process's file domain
+         * and is written by this process. */
+        ADIOI_Access *others_req;
+        int count_others_req_procs, *count_others_req_per_proc;
+        ADIO_Offset **buf_idx = NULL;
 
-    /* calculate what portions of the access requests of this process are
-     * located in which process
-     */
-    ADIOI_LUSTRE_Calc_my_req(fd, offset_list, len_list, contig_access_count,
-                             striping_info, nprocs, &count_my_req_procs,
-                             &count_my_req_per_proc, &my_req, &buf_idx);
+        /* Calculate what portions of this process's write requests that fall
+         * into the file domains of each I/O aggregator.  No inter-process
+         * communication is needed.
+         */
+        ADIOI_LUSTRE_Calc_my_req(fd, offset_list, len_list, contig_access_count,
+                                 striping_info, nprocs, &count_my_req_procs,
+                                 &count_my_req_per_proc, &my_req, &buf_idx);
 
-    /* based on everyone's my_req, calculate what requests of other processes
-     * will be accessed by this process.
-     * count_others_req_procs = number of processes whose requests (including
-     * this process itself) will be accessed by this process
-     * count_others_req_per_proc[i] indicates how many separate contiguous
-     * requests of proc. i will be accessed by this process.
-     */
+        /* Calculate what parts of requests from other processes fall into this
+         * process's file domain (note only I/O aggregators are assigned file
+         * domains). Inter-process communication is required to construct
+         * others_req[], including MPI_Alltoall, MPI_Isend, MPI_Irecv, and
+         * MPI_Waitall.
+         *
+         * count_others_req_procs = number of processes whose requests
+         * (including this process itself) fall into this process's file
+         * domain.
+         * count_others_req_per_proc[i] indicates how many noncontiguous
+         * requests from process i that fall into this process's file domain.
+         */
+        ADIOI_Calc_others_req(fd, count_my_req_procs, count_my_req_per_proc,
+                              my_req, nprocs, myrank, &count_others_req_procs,
+                              &count_others_req_per_proc, &others_req);
 
-    ADIOI_Calc_others_req(fd, count_my_req_procs, count_my_req_per_proc,
-                          my_req, nprocs, myrank, &count_others_req_procs,
-                          &count_others_req_per_proc, &others_req);
+        /* Two-phase I/O: first communication phase to exchange write data from
+         * all processes to the I/O aggregators, followed by the write phase
+         * where only I/O aggregators write to the file. There is no collective
+         * MPI communication in ADIOI_LUSTRE_Exch_and_write(), only MPI_Issend,
+         * MPI_Irecv, and MPI_Waitall.
+         */
+        ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, nprocs, myrank,
+                                    others_req, my_req, offset_list, len_list,
+                                    min_st_loc, max_end_loc,
+                                    contig_access_count, striping_info, buf_idx, error_code);
 
-    /* exchange data and write in sizes of no more than stripe_size. */
-    ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, nprocs, myrank,
-                                others_req, my_req, offset_list, len_list,
-                                contig_access_count, striping_info, buf_idx, error_code);
+        /* free all memory allocated */
+        ADIOI_Free_others_req(nprocs, count_others_req_per_proc, others_req);
+        ADIOI_LUSTRE_Free_my_req(nprocs, count_my_req_per_proc, my_req, buf_idx);
+    }
+    ADIOI_Free(offset_list);
 
-    /* If this collective write is followed by an independent write,
-     * it's possible to have those subsequent writes on other processes
-     * race ahead and sneak in before the read-modify-write completes.
-     * We carry out a collective communication at the end here so no one
-     * can start independent i/o before collective I/O completes.
+    /* If this collective write is followed by an independent write, it's
+     * possible to have those subsequent writes on other processes race ahead
+     * and sneak in before the read-modify-write completes.  We carry out a
+     * collective communication at the end here so no one can start independent
+     * I/O before collective I/O completes.
      *
      * need to do some gymnastics with the error codes so that if something
      * went wrong, all processes report error, but if a process has a more
      * specific error code, we can still have that process report the
      * additional information */
-
     old_error = *error_code;
     if (*error_code != MPI_SUCCESS)
         *error_code = MPI_ERR_IO;
 
-    /* optimization: if only one process performing i/o, we can perform
-     * a less-expensive Bcast  */
+    /* optimization: if only one process performing I/O, we can perform
+     * a less-expensive Bcast. */
 #ifdef ADIOI_MPE_LOGGING
     MPE_Log_event(ADIOI_MPE_postwrite_a, 0, NULL);
 #endif
@@ -337,14 +303,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
     if ((old_error != MPI_SUCCESS) && (old_error != MPI_ERR_IO))
         *error_code = old_error;
 
-    /* free all memory allocated for collective I/O */
-    /* free others_req */
-    ADIOI_LUSTRE_Free_my_req(nprocs, count_my_req_per_proc, my_req, buf_idx);
-    ADIOI_Free_others_req(nprocs, count_others_req_per_proc, others_req);
-    ADIOI_Free(offset_list);
-    ADIOI_Free(st_offsets);
-
-  fn_exit:
 #ifdef HAVE_STATUS_SET_BYTES
     if (status) {
         MPI_Count bufsize, size;
@@ -361,8 +319,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
     fd->fp_sys_posn = -1;       /* set it to null. */
 }
 
-/* If successful, error_code is set to MPI_SUCCESS.  Otherwise an error
- * code is created and returned in error_code.
+/* If successful, error_code is set to MPI_SUCCESS.  Otherwise an error code is
+ * created and returned in error_code.
  */
 static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
                                         MPI_Datatype datatype, int nprocs,
@@ -370,123 +328,117 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
                                         ADIOI_Access * my_req,
                                         ADIO_Offset * offset_list,
                                         ADIO_Offset * len_list,
+                                        ADIO_Offset min_st_loc, ADIO_Offset max_end_loc,
                                         int contig_access_count,
                                         int *striping_info, ADIO_Offset ** buf_idx, int *error_code)
 {
-    /* Send data to appropriate processes and write in sizes of no more
-     * than lustre stripe_size.
-     * The idea is to reduce the amount of extra memory required for
-     * collective I/O. If all data were written all at once, which is much
-     * easier, it would require temp space more than the size of user_buf,
-     * which is often unacceptable. For example, to write a distributed
-     * array to a file, where each local array is 8Mbytes, requiring
-     * at least another 8Mbytes of temp space is unacceptable.
+    /* Each process sends all its write requests to I/O aggregators based on
+     * the file domain assignment to the aggregators. In this implementation,
+     * a file is first divided into stripes and all its stripes are assigned to
+     * I/O aggregators in a round-robin fashion. The collective write is
+     * carried out in 'ntimes' rounds of two-phase I/O. Each round covers an
+     * aggregate file region of size equal to the file stripe size times the
+     * number of I/O aggregators. In other words, the 'collective buffer size'
+     * used in each aggregator is always set equally to the file stripe size,
+     * ignoring the MPI-IO hint 'cb_buffer_size'. There are other algorithms
+     * allowing an aggregator to write more than a file stripe size in each
+     * round, up to the cb_buffer_size hint. For those, refer to the paper:
+     * Wei-keng Liao, and Alok Choudhary. "Dynamically Adapting File Domain
+     * Partitioning Methods for Collective I/O Based on Underlying Parallel
+     * File System Locking Protocols", in The Supercomputing Conference, 2008.
      */
 
-    int hole, i, j, m, flag, ntimes = 1, max_ntimes, buftype_is_contig;
-    ADIO_Offset st_loc = -1, end_loc = -1, min_st_loc, max_end_loc;
-    ADIO_Offset off, req_off, send_off, iter_st_off, *off_list;
-    ADIO_Offset max_size, step_size = 0;
-    int real_size, req_len, send_len;
-    int *recv_curr_offlen_ptr, *recv_count, *recv_size;
-    int *send_curr_offlen_ptr, *send_size;
-    int *sent_to_proc, *recv_start_pos;
-    int *curr_to_proc, *done_to_proc;
-    ADIO_Offset *send_buf_idx, *this_buf_idx;
     char *write_buf = NULL;
-    MPI_Status status;
+    int i, j, m, ntimes, buftype_is_contig;
+    int *recv_curr_offlen_ptr, *recv_size, *recv_count, *recv_start_pos;
+    int *send_curr_offlen_ptr, *send_size, *sent_to_proc;
+    int *curr_to_proc, *done_to_proc, *srt_len = NULL, srt_num = 0;
+    int stripe_size = striping_info[0], avail_cb_nodes = striping_info[2];
+    ADIO_Offset end_loc, req_off, iter_end_off, *off_list, step_size;
+    ADIO_Offset *send_buf_idx, *this_buf_idx, *srt_off = NULL;
     ADIOI_Flatlist_node *flat_buf = NULL;
     MPI_Aint lb, buftype_extent;
-    int stripe_size = striping_info[0], avail_cb_nodes = striping_info[2];
-    int data_sieving = 0;
-    ADIO_Offset *srt_off = NULL;
-    int *srt_len = NULL;
-    int srt_num = 0;
-    ADIO_Offset block_offset;
-    int block_len;
 
-    *error_code = MPI_SUCCESS;  /* changed below if error */
-    /* only I/O errors are currently reported */
+    *error_code = MPI_SUCCESS;
 
-    /* calculate the number of writes of stripe size to be done.
-     * That gives the no. of communication phases as well.
-     * Note:
-     *   Because we redistribute data in stripe-contiguous pattern for Lustre,
-     *   each process has the same no. of communication phases.
+    /* The aggregate access region (across all processes) of this collective
+     * write starts from min_st_loc and ends at max_end_loc. The collective
+     * write is carried out in 'ntimes' rounds of two-phase I/O. Each round
+     * covers an aggregate file region of size 'step_size' written only by
+     * 'avail_cb_nodes' number of processes (I/O aggregators). Note
+     * non-aggregators must also participate all ntimes rounds to send their
+     * requests to I/O aggregators.
      */
 
-    for (i = 0; i < nprocs; i++) {
-        if (others_req[i].count) {
-            st_loc = others_req[i].offsets[0];
-            end_loc = others_req[i].offsets[0];
-            break;
-        }
-    }
-    for (i = 0; i < nprocs; i++) {
-        for (j = 0; j < others_req[i].count; j++) {
-            st_loc = MPL_MIN(st_loc, others_req[i].offsets[j]);
-            end_loc = MPL_MAX(end_loc, (others_req[i].offsets[j] + others_req[i].lens[j] - 1));
-        }
-    }
-    /* this process does no writing. */
-    if ((st_loc == -1) && (end_loc == -1))
-        ntimes = 0;
-    MPI_Allreduce(&end_loc, &max_end_loc, 1, MPI_LONG_LONG_INT, MPI_MAX, fd->comm);
-    /* avoid min_st_loc be -1 */
-    if (st_loc == -1)
-        st_loc = max_end_loc;
-    MPI_Allreduce(&st_loc, &min_st_loc, 1, MPI_LONG_LONG_INT, MPI_MIN, fd->comm);
-    /* align downward */
+    /* step_size is the size of aggregate access region covered by each round
+     * of two-phase I/O
+     */
+    step_size = ((ADIO_Offset) avail_cb_nodes) * stripe_size;
+
+    /* align min_st_loc downward to the nearest file stripe boundary */
     min_st_loc -= min_st_loc % (ADIO_Offset) stripe_size;
 
-    /* Each time, only avail_cb_nodes number of IO clients perform IO,
-     * so, step_size=avail_cb_nodes*stripe_size IO will be performed at most,
-     * and ntimes=whole_file_portion/step_size
+    /* ntimes is the number of rounds of two-phase I/O */
+    ntimes = (max_end_loc - min_st_loc + 1) / step_size;
+    if ((max_end_loc - min_st_loc + 1) % step_size)
+        ntimes++;
+
+    /* off_list[m] is the starting file offset of this process's write region
+     * in iteration m (file domain of iteration m). This offset may not be
+     * aligned with file stripe boundaries. end_loc is the ending file offset
+     * of this process's file domain.
      */
-    step_size = (ADIO_Offset) avail_cb_nodes *stripe_size;
-    max_ntimes = (max_end_loc - min_st_loc + 1) / step_size
-        + (((max_end_loc - min_st_loc + 1) % step_size) ? 1 : 0);
-/*     max_ntimes = (int)((max_end_loc - min_st_loc) / step_size + 1); */
-    if (ntimes)
-        write_buf = (char *) ADIOI_Malloc(stripe_size);
-
-    /* calculate the start offset for each iteration */
-    off_list = (ADIO_Offset *) ADIOI_Malloc((max_ntimes + 2 * nprocs) * sizeof(ADIO_Offset));
-    send_buf_idx = off_list + max_ntimes;
-    this_buf_idx = send_buf_idx + nprocs;
-
-    for (m = 0; m < max_ntimes; m++)
+    off_list = (ADIO_Offset *) ADIOI_Malloc((ntimes + 2 * nprocs) * sizeof(ADIO_Offset));
+    end_loc = -1;
+    for (m = 0; m < ntimes; m++)
         off_list[m] = max_end_loc;
     for (i = 0; i < nprocs; i++) {
         for (j = 0; j < others_req[i].count; j++) {
             req_off = others_req[i].offsets[j];
             m = (int) ((req_off - min_st_loc) / step_size);
             off_list[m] = MPL_MIN(off_list[m], req_off);
+            end_loc = MPL_MAX(end_loc, (others_req[i].offsets[j] + others_req[i].lens[j] - 1));
         }
     }
 
+    /* end_loc >= 0 indicates this process has something to write.
+     * Only I/O aggregators can have end_loc > 0. write_buf is the collective
+     * buffer and only matter for I/O aggregators. It is allocated with space
+     * of twice the file stripe size. The second half will be used to receive
+     * write data from remote processes, which are later copied over to the
+     * first half. Once communications are complete, the contents of first half
+     * are written to file.
+     */
+    if (end_loc >= 0)
+        write_buf = (char *) ADIOI_Malloc(stripe_size * 2);
+
+    /* send_buf_idx and this_buf_idx are indices to user buffer for sending
+     * this process's write data to remote aggregators. These two are used only
+     * when user buffer is contiguous.
+     */
+    send_buf_idx = off_list + ntimes;
+    this_buf_idx = send_buf_idx + nprocs;
+
+    /* allocate int buffers altogether at once in a single calloc call */
     recv_curr_offlen_ptr = (int *) ADIOI_Calloc(nprocs * 9, sizeof(int));
     send_curr_offlen_ptr = recv_curr_offlen_ptr + nprocs;
     /* their use is explained below. calloc initializes to 0. */
 
     recv_count = send_curr_offlen_ptr + nprocs;
-    /* to store count of how many off-len pairs per proc are satisfied
-     * in an iteration. */
+    /* the number of off-len pairs to be received from each proc in an iteration. */
 
     send_size = recv_count + nprocs;
-    /* total size of data to be sent to each proc. in an iteration.
-     * Of size nprocs so that I can use MPI_Alltoall later. */
+    /* array of data sizes to be sent to each proc in an iteration. */
 
     recv_size = send_size + nprocs;
-    /* total size of data to be recd. from each proc. in an iteration. */
+    /* array of data sizes to be received from each proc in an iteration. */
 
     sent_to_proc = recv_size + nprocs;
-    /* amount of data sent to each proc so far. Used in
-     * ADIOI_Fill_send_buffer. initialized to 0 here. */
+    /* amount of data sent to each proc so far, initialized to 0 here. */
 
     curr_to_proc = sent_to_proc + nprocs;
     done_to_proc = curr_to_proc + nprocs;
-    /* Above three are used in ADIOI_Fill_send_buffer */
+    /* Above three are used in ADIOI_Fill_send_buffer only */
 
     recv_start_pos = done_to_proc + nprocs;
     /* used to store the starting value of recv_curr_offlen_ptr[i] in
@@ -497,6 +449,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
         flat_buf = ADIOI_Flatten_and_find(datatype);
     }
     MPI_Type_get_extent(datatype, &lb, &buftype_extent);
+
     /* I need to check if there are any outstanding nonblocking writes to
      * the file, which could potentially interfere with the writes taking
      * place in this collective write call. Since this is not likely to be
@@ -508,76 +461,70 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
      * MPI_Barrier(fd->comm);
      */
 
-    iter_st_off = min_st_loc;
-
-    /* Although we have recognized the data according to OST index,
-     * a read-modify-write will be done if there is a hole between the data.
-     * For example: if blocksize=60, xfersize=30 and stripe_size=100,
-     * then rank0 will collect data [0, 30] and [60, 90] then write. There
-     * is a hole in [30, 60], which will cause a read-modify-write in [0, 90].
-     *
-     * To reduce its impact on the performance, we can disable data sieving
-     * by hint "ds_in_coll".
+    /* min_st_loc has been downward aligned to the nearest file stripe
+     * boundary, iter_end_off is the ending file offset of aggregate write
+     * region of iteration m, upward aligned to the file stripe boundary.
      */
-    /* check the hint for data sieving */
-    data_sieving = fd->hints->fs_hints.lustre.ds_in_coll;
+    iter_end_off = min_st_loc + step_size;
 
-    for (m = 0; m < max_ntimes; m++) {
-        /* go through all others_req and my_req to check which will be received
-         * and sent in this iteration.
-         */
+    for (m = 0; m < ntimes; m++) {
+        int real_size;
+        ADIO_Offset real_off;
 
-        /* Note that MPI guarantees that displacements in filetypes are in
-         * monotonically nondecreasing order and that, for writes, the
+        /* Note that MPI standard requires that displacements in filetypes are
+         * in a monotonically nondecreasing order and that, for writes, the
          * filetypes cannot specify overlapping regions in the file. This
-         * simplifies implementation a bit compared to reads. */
-
-        /*
-         * off         = start offset in the file for the data to be written in
-         * this iteration
-         * iter_st_off = start offset of this iteration
-         * real_size   = size of data written (bytes) corresponding to off
-         * max_size    = possible maximum size of data written in this iteration
-         * req_off     = offset in the file for a particular contiguous request minus
-         * what was satisfied in previous iteration
-         * send_off    = offset the request needed by other processes in this iteration
-         * req_len     = size corresponding to req_off
-         * send_len    = size corresponding to send_off
+         * simplifies implementation a bit compared to reads.
+         *
+         * real_off      = starting file offset of this process's write region
+         *                 for this round (may not be aligned to stripe
+         *                 boundary)
+         * real_size     = size (in bytes) of this process's write region for
+         *                 this found
+         * iter_end_off  = ending file offset of aggregate write region of this
+         *                 round, and upward aligned to the file stripe
+         *                 boundary. Note the aggregate write region of this
+         *                 round starts from (iter_end_off-step_size) to
+         *                 iter_end_off, aligned with file stripe boundaries.
+         * send_size[i]  = total size in bytes of this process's write data
+         *                 fall into process i's write region for this round.
+         * recv_size[i]  = total size in bytes of write data to be received by
+         *                 this process (aggregator) for this round.
+         * recv_count[i] = the number of noncontiguous offset-length pairs from
+         *                 process i fall into this aggregator's write region
+         *                 for this round.
          */
 
-        /* first calculate what should be communicated */
+        /* reset communication metadata to all 0s for this round */
         for (i = 0; i < nprocs; i++)
-            recv_count[i] = recv_size[i] = send_size[i] = 0;
+            recv_count[i] = send_size[i] = recv_size[i] = 0;
 
-        off = off_list[m];
-        max_size = MPL_MIN(step_size, max_end_loc - iter_st_off + 1);
-        real_size = (int) MPL_MIN((off / stripe_size + 1) * stripe_size - off, end_loc - off + 1);
+        real_off = off_list[m];
+        real_size = (int) MPL_MIN(stripe_size - real_off % stripe_size, end_loc - real_off + 1);
 
+        /* First calculate what should be communicated, by going through all
+         * others_req and my_req to check which will be sent and received in
+         * this round.
+         */
         for (i = 0; i < nprocs; i++) {
             if (my_req[i].count) {
                 this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]];
                 for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
-                    send_off = my_req[i].offsets[j];
-                    send_len = my_req[i].lens[j];
-                    if (send_off < iter_st_off + max_size) {
-                        send_size[i] += send_len;
-                    } else {
+                    if (my_req[i].offsets[j] < iter_end_off)
+                        send_size[i] += my_req[i].lens[j];
+                    else
                         break;
-                    }
                 }
                 send_curr_offlen_ptr[i] = j;
             }
             if (others_req[i].count) {
                 recv_start_pos[i] = recv_curr_offlen_ptr[i];
                 for (j = recv_curr_offlen_ptr[i]; j < others_req[i].count; j++) {
-                    req_off = others_req[i].offsets[j];
-                    req_len = others_req[i].lens[j];
-                    if (req_off < iter_st_off + max_size) {
+                    if (others_req[i].offsets[j] < iter_end_off) {
                         recv_count[i]++;
-                        ADIOI_Assert((((ADIO_Offset) (uintptr_t) write_buf) + req_off - off) ==
-                                     (ADIO_Offset) (uintptr_t) (write_buf + req_off - off));
-                        MPI_Get_address(write_buf + req_off - off, &(others_req[i].mem_ptrs[j]));
-                        recv_size[i] += req_len;
+                        others_req[i].mem_ptrs[j] =
+                            (MPI_Aint) (others_req[i].offsets[j] - real_off);
+                        recv_size[i] += others_req[i].lens[j];
                     } else {
                         break;
                     }
@@ -585,103 +532,184 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
                 recv_curr_offlen_ptr[i] = j;
             }
         }
-        /* use variable "hole" to pass data_sieving flag into W_Exchange_data */
-        hole = data_sieving;
+        iter_end_off += step_size;
+
+        /* redistribute (exchange) this process's write requests to I/O
+         * aggregators. In ADIOI_LUSTRE_W_Exchange_data(), communication are
+         * Issend and Irecv, but no collective communication.
+         */
         ADIOI_LUSTRE_W_Exchange_data(fd, buf, write_buf, flat_buf, offset_list,
-                                     len_list, send_size, recv_size, off, real_size,
+                                     len_list, send_size, recv_size, real_off, real_size,
                                      recv_count, recv_start_pos,
                                      sent_to_proc, nprocs, myrank,
                                      buftype_is_contig, contig_access_count,
                                      striping_info, others_req, send_buf_idx,
-                                     curr_to_proc, done_to_proc, &hole, m,
+                                     curr_to_proc, done_to_proc, m,
                                      buftype_extent, this_buf_idx,
                                      &srt_off, &srt_len, &srt_num, error_code);
 
         if (*error_code != MPI_SUCCESS)
             goto over;
 
-        flag = 0;
-        for (i = 0; i < nprocs; i++)
-            if (recv_count[i]) {
-                flag = 1;
-                break;
-            }
-        if (flag) {
-            /* check whether to do data sieving */
-            if (data_sieving == ADIOI_HINT_ENABLE) {
-                ADIOI_LUSTRE_WR_LOCK_AHEAD(fd, striping_info[2], off, error_code);
-                ADIO_WriteContig(fd, write_buf, real_size, MPI_BYTE,
-                                 ADIO_EXPLICIT_OFFSET, off, &status, error_code);
-            } else {
-                /* if there is no hole, write data in one time;
-                 * otherwise, write data in several times */
-                if (!hole) {
-                    ADIOI_LUSTRE_WR_LOCK_AHEAD(fd, striping_info[2], off, error_code);
-                    ADIO_WriteContig(fd, write_buf, real_size, MPI_BYTE,
-                                     ADIO_EXPLICIT_OFFSET, off, &status, error_code);
-                } else {
-                    block_offset = -1;
-                    block_len = 0;
-                    for (i = 0; i < srt_num; ++i) {
-                        if (srt_off[i] < off + real_size && srt_off[i] >= off) {
-                            if (block_offset == -1) {
-                                block_offset = srt_off[i];
-                                block_len = srt_len[i];
-                            } else {
-                                if (srt_off[i] == block_offset + block_len) {
-                                    block_len += srt_len[i];
-                                } else {
-                                    ADIOI_LUSTRE_WR_LOCK_AHEAD(fd, striping_info[2], block_offset,
-                                                               error_code);
-                                    ADIO_WriteContig(fd, write_buf + block_offset - off, block_len,
-                                                     MPI_BYTE, ADIO_EXPLICIT_OFFSET, block_offset,
-                                                     &status, error_code);
-                                    if (*error_code != MPI_SUCCESS)
-                                        goto over;
-                                    block_offset = srt_off[i];
-                                    block_len = srt_len[i];
-                                }
-                            }
-                        }
-                    }
-                    if (block_offset != -1) {
-                        ADIOI_LUSTRE_WR_LOCK_AHEAD(fd, striping_info[2], block_offset, error_code);
-                        ADIO_WriteContig(fd,
-                                         write_buf + block_offset - off,
-                                         block_len,
-                                         MPI_BYTE, ADIO_EXPLICIT_OFFSET,
-                                         block_offset, &status, error_code);
-                        if (*error_code != MPI_SUCCESS)
-                            goto over;
-                    }
-                }
-            }
+        /* if there is no data to write for this iteration m */
+        if (srt_num == 0)
+            continue;
+
+        /* lock ahead the file starting from real_off */
+        ADIOI_LUSTRE_WR_LOCK_AHEAD(fd, striping_info[2], real_off, error_code);
+        if (*error_code != MPI_SUCCESS)
+            goto over;
+
+        /* When srt_num == 1, either there is no hole in the write buffer or
+         * the file domain has been read into write buffer and updated with the
+         * received write data. When srt_num > 1, holes have been found and the
+         * list of sorted offset-length pairs describing noncontiguous writes
+         * have been constructed. Call writes for each offset-length pair. Note
+         * the offset-length pairs (represented by srt_off, srt_len, and
+         * srt_num) have been coalesced in ADIOI_LUSTRE_W_Exchange_data().
+         */
+        for (i = 0; i < srt_num; i++) {
+            MPI_Status status;
+
+            /* all write requests should fall into this stripe ranging
+             * [real_off, real_off+real_size). This assertion should never fail.
+             */
+            ADIOI_Assert(srt_off[i] < real_off + real_size && srt_off[i] >= real_off);
+
+            ADIO_WriteContig(fd, write_buf + (srt_off[i] - real_off), srt_len[i],
+                             MPI_BYTE, ADIO_EXPLICIT_OFFSET, srt_off[i], &status, error_code);
             if (*error_code != MPI_SUCCESS)
                 goto over;
         }
-        iter_st_off += max_size;
     }
   over:
     if (srt_off)
         ADIOI_Free(srt_off);
     if (srt_len)
         ADIOI_Free(srt_len);
-    if (ntimes)
+    if (write_buf != NULL)
         ADIOI_Free(write_buf);
     ADIOI_Free(recv_curr_offlen_ptr);
     ADIOI_Free(off_list);
 }
 
-/* Sets error_code to MPI_SUCCESS if successful, or creates an error code
- * in the case of error.
+/* This subroutine is copied from ADIOI_Heap_merge(), but modified to coalesce
+ * sorted offset-length pairs whenever possible.
+ *
+ * Heapify(a, i, heapsize); Algorithm from Cormen et al. pg. 143 modified for a
+ * heap with smallest element at root. The recursion has been removed so that
+ * there are no function calls. Function calls are too expensive.
  */
+static
+void heap_merge(const ADIOI_Access * others_req, const int *count, ADIO_Offset * srt_off,
+                int *srt_len, const int *start_pos, int nprocs, int nprocs_recv,
+                int *total_elements)
+{
+    typedef struct {
+        ADIO_Offset *off_list;
+        ADIO_Offset *len_list;
+        int nelem;
+    } heap_struct;
+
+    heap_struct *a, tmp;
+    int i, j, heapsize, l, r, k, smallest;
+
+    a = (heap_struct *) ADIOI_Malloc((nprocs_recv + 1) * sizeof(heap_struct));
+
+    j = 0;
+    for (i = 0; i < nprocs; i++) {
+        if (count[i]) {
+            a[j].off_list = others_req[i].offsets + start_pos[i];
+            a[j].len_list = others_req[i].lens + start_pos[i];
+            a[j].nelem = count[i];
+            j++;
+        }
+    }
+
+#define SWAP(x, y, tmp) { tmp = x ; x = y ; y = tmp ; }
+
+    heapsize = nprocs_recv;
+
+    /* Build a heap out of the first element from each list, with the smallest
+     * element of the heap at the root. The first for loop is to find and move
+     * the smallest a[*].off_list[0] to a[0].
+     */
+    for (i = heapsize / 2 - 1; i >= 0; i--) {
+        k = i;
+        for (;;) {
+            r = 2 * (k + 1);
+            l = r - 1;
+            if ((l < heapsize) && (*(a[l].off_list) < *(a[k].off_list)))
+                smallest = l;
+            else
+                smallest = k;
+
+            if ((r < heapsize) && (*(a[r].off_list) < *(a[smallest].off_list)))
+                smallest = r;
+
+            if (smallest != k) {
+                SWAP(a[k], a[smallest], tmp);
+                k = smallest;
+            } else
+                break;
+        }
+    }
+
+    /* The heap keeps the smallest element in its first element, i.e.
+     * a[0].off_list[0].
+     */
+    j = 0;
+    for (i = 0; i < *total_elements; i++) {
+        /* extract smallest element from heap, i.e. the root */
+        if (j == 0 || srt_off[j - 1] + srt_len[j - 1] < *(a[0].off_list)) {
+            srt_off[j] = *(a[0].off_list);
+            srt_len[j] = *(a[0].len_list);
+            j++;
+        } else {
+            /* this offset-length pair can be coalesced into the previous one */
+            srt_len[j - 1] = *(a[0].off_list) + *(a[0].len_list) - srt_off[j - 1];
+        }
+        (a[0].nelem)--;
+
+        if (a[0].nelem) {
+            (a[0].off_list)++;
+            (a[0].len_list)++;
+        } else {
+            a[0] = a[heapsize - 1];
+            heapsize--;
+        }
+
+        /* Heapify(a, 0, heapsize); */
+        k = 0;
+        for (;;) {
+            r = 2 * (k + 1);
+            l = r - 1;
+            if ((l < heapsize) && (*(a[l].off_list) < *(a[k].off_list)))
+                smallest = l;
+            else
+                smallest = k;
+
+            if ((r < heapsize) && (*(a[r].off_list) < *(a[smallest].off_list)))
+                smallest = r;
+
+            if (smallest != k) {
+                SWAP(a[k], a[smallest], tmp);
+                k = smallest;
+            } else
+                break;
+        }
+    }
+    ADIOI_Free(a);
+    *total_elements = j;
+}
+
 static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          char *write_buf,
                                          ADIOI_Flatlist_node * flat_buf,
                                          ADIO_Offset * offset_list,
                                          ADIO_Offset * len_list, int *send_size,
-                                         int *recv_size, ADIO_Offset off,
-                                         int size, int *count,
+                                         int *recv_size, ADIO_Offset real_off,
+                                         int real_size, int *recv_count,
                                          int *start_pos,
                                          int *sent_to_proc, int nprocs,
                                          int myrank, int buftype_is_contig,
@@ -690,67 +718,65 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          ADIOI_Access * others_req,
                                          ADIO_Offset * send_buf_idx,
                                          int *curr_to_proc, int *done_to_proc,
-                                         int *hole, int iter,
+                                         int iter,
                                          MPI_Aint buftype_extent,
                                          ADIO_Offset * buf_idx,
                                          ADIO_Offset ** srt_off, int **srt_len, int *srt_num,
                                          int *error_code)
 {
-    int i, j, k, nprocs_recv, nprocs_send, err;
-    char **send_buf = NULL;
-    MPI_Request *requests, *send_req;
-    MPI_Datatype *recv_types;
-    MPI_Status *statuses, status;
-    int sum_recv;
-    int data_sieving = *hole;
+    char *buf_ptr, *contig_buf, **send_buf = NULL;
+    int i, nprocs_recv, nprocs_send, err;
+    int sum_recv, nreqs, hole, check_hole;
     static size_t malloc_srt_num = 0;
-    size_t send_total_size;
-    static char myname[] = "ADIOI_W_EXCHANGE_DATA";
+    MPI_Request *requests;
+    MPI_Status status;
+    static char myname[] = "ADIOI_LUSTRE_W_EXCHANGE_DATA";
 
-    /* create derived datatypes for recv */
+    /* calculate send receive metadata */
     *srt_num = 0;
     sum_recv = 0;
     nprocs_recv = 0;
     nprocs_send = 0;
-    send_total_size = 0;
     for (i = 0; i < nprocs; i++) {
-        *srt_num += count[i];
+        *srt_num += recv_count[i];
         sum_recv += recv_size[i];
         if (recv_size[i])
             nprocs_recv++;
-        if (send_size[i]) {
+        if (send_size[i])
             nprocs_send++;
-            send_total_size += send_size[i];
-        }
     }
 
-    *hole = (size > sum_recv) ? 1 : 0;
-
-    recv_types = (MPI_Datatype *) ADIOI_Malloc((nprocs_recv + 1) * sizeof(MPI_Datatype));
-    /* +1 to avoid a 0-size malloc */
-
-    j = 0;
-    for (i = 0; i < nprocs; i++) {
-        if (recv_size[i]) {
-            ADIOI_Type_create_hindexed_x(count[i],
-                                         &(others_req[i].lens[start_pos[i]]),
-                                         &(others_req[i].mem_ptrs[start_pos[i]]),
-                                         MPI_BYTE, recv_types + j);
-            /* absolute displacements; use MPI_BOTTOM in recv */
-            MPI_Type_commit(recv_types + j);
-            j++;
+    /* determine whether checking holes is necessary */
+    check_hole = 1;
+    if (*srt_num == 0) {
+        /* this process has nothing to receive and hence no hole */
+        check_hole = 0;
+        hole = 0;
+    } else if (fd->hints->ds_write == ADIOI_HINT_AUTO) {
+        if (*srt_num > fd->hints->ds_wr_lb) {
+            /* Number of offset-length pairs is too large, making merge sort
+             * expensive. Skip the sorting in hole checking and proceed with
+             * read-modify-write.
+             */
+            check_hole = 0;
+            hole = 1;
         }
+        /* else: merge sort is less expensive, proceed to check_hole */
     }
-
-    /* To avoid a read-modify-write,
-     * check if there are holes in the data to be written.
-     * For this, merge the (sorted) offset lists others_req using a heap-merge.
+    /* else: fd->hints->ds_write == ADIOI_HINT_ENABLE or ADIOI_HINT_DISABLE,
+     * proceed to check_hole, as we must construct srt_off and srt_len.
      */
 
-    if (*srt_num) {
+    if (check_hole) {
+        /* merge the offset-length pairs of all others_req[] (already sorted
+         * individually) into a single list of offset-length pairs (srt_off and
+         * srt_len) in an increasing order of file offsets using a heap-merge
+         * sorting algorithm.
+         */
         if (*srt_off == NULL || *srt_num > malloc_srt_num) {
-            /* must check srt_off against NULL, as the collective write can be
-             * called more than once */
+            /* Try to avoid malloc each round. If *srt_num is less than
+             * previous round, the already allocated space can be reused.
+             */
             if (*srt_off != NULL) {
                 ADIOI_Free(*srt_off);
                 ADIOI_Free(*srt_len);
@@ -760,145 +786,193 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
             malloc_srt_num = *srt_num;
         }
 
-        ADIOI_Heap_merge(others_req, count, *srt_off, *srt_len, start_pos,
-                         nprocs, nprocs_recv, *srt_num);
+        heap_merge(others_req, recv_count, *srt_off, *srt_len, start_pos,
+                   nprocs, nprocs_recv, srt_num);
+
+        /* (*srt_num) has been updated in heap_merge() such that (*srt_off) and
+         * (*srt_len) were coalesced
+         */
+        hole = (*srt_num > 1);
     }
 
-    /* In some cases (see John Bent ROMIO REQ # 835), an odd interaction
-     * between aggregation, nominally contiguous regions, and cb_buffer_size
-     * should be handled with a read-modify-write (otherwise we will write out
-     * more data than we receive from everyone else (inclusive), so override
-     * hole detection
-     */
-    if (*hole == 0) {
-        for (i = 0; i < *srt_num - 1; i++) {
-            if ((*srt_off)[i] + (*srt_len)[i] < (*srt_off)[i + 1]) {
-                *hole = 1;
-                break;
-            }
-        }
-    }
-
-    /* check the hint for data sieving */
-    if (data_sieving == ADIOI_HINT_ENABLE && nprocs_recv && *hole) {
-        ADIO_ReadContig(fd, write_buf, size, MPI_BYTE, ADIO_EXPLICIT_OFFSET, off, &status, &err);
-        // --BEGIN ERROR HANDLING--
+    /* data sieving */
+    if (fd->hints->ds_write != ADIOI_HINT_DISABLE && hole) {
+        ADIO_ReadContig(fd, write_buf, real_size, MPI_BYTE, ADIO_EXPLICIT_OFFSET,
+                        real_off, &status, &err);
         if (err != MPI_SUCCESS) {
             *error_code = MPIO_Err_create_code(err,
                                                MPIR_ERR_RECOVERABLE,
                                                myname, __LINE__, MPI_ERR_IO, "**ioRMWrdwr", 0);
-            ADIOI_Free(recv_types);
             return;
         }
-        // --END ERROR HANDLING--
+
+        /* Once read, holes have been filled and thus the number of
+         * offset-length pairs, *srt_num, becomes one.
+         */
+        *srt_num = 1;
+        if (*srt_off == NULL) {
+            *srt_off = (ADIO_Offset *) ADIOI_Malloc(sizeof(ADIO_Offset));
+            *srt_len = (int *) ADIOI_Malloc(sizeof(int));
+            malloc_srt_num = 1;
+        }
+        (*srt_off)[0] = real_off;
+        (*srt_len)[0] = real_size;
     }
 
+    /* It is possible sum_recv (sum of message sizes to be received) is larger
+     * than the size of collective buffer, write_buf, if writes from multiple
+     * remote processes overlap. Receiving messages into overlapped regions of
+     * the same write_buffer may cause a problem. To avoid it, we allocate a
+     * temporary buffer big enough to receive all messages into disjointed
+     * regions. Earlier in ADIOI_LUSTRE_Exch_and_write(), write_buf is already
+     * allocated with twice amount of the file stripe size, wth the second half
+     * to be used to receive messages. If sum_recv is smalled than file stripe
+     * size, we can reuse that space. But if sum_recv is bigger (an overlap
+     * case, which is rare), we allocate a separate buffer of size sum_recv.
+     */
+    sum_recv -= recv_size[myrank];
+    if (sum_recv > striping_info[0])
+        contig_buf = (char *) ADIOI_Malloc(sum_recv);
+    else
+        contig_buf = write_buf + striping_info[0];
+
+#define MEMCPY_UNPACK(x, inbuf) {                                   \
+    int _k;                                                         \
+    char *_ptr = (inbuf);                                           \
+    MPI_Aint    *mem_ptrs = others_req[x].mem_ptrs + start_pos[x];  \
+    ADIO_Offset *mem_lens = others_req[x].lens     + start_pos[x];  \
+    for (_k=0; _k<recv_count[x]; _k++) {                            \
+        memcpy(write_buf + mem_ptrs[_k], _ptr, mem_lens[_k]);       \
+        _ptr += mem_lens[_k];                                       \
+    }                                                               \
+}
+
+    /* nreqs is the number of Issend and Irecv to be posted */
+    nreqs = 0;
     if (fd->atomicity) {
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
+        /* atomic mode calls blocking receive only */
         requests = (MPI_Request *) ADIOI_Malloc((nprocs_send + 1) * sizeof(MPI_Request));
-        send_req = requests;
     } else {
-        requests = (MPI_Request *) ADIOI_Malloc((nprocs_send + nprocs_recv + 1) *
-                                                sizeof(MPI_Request));
-        /* +1 to avoid a 0-size malloc */
+        requests =
+            (MPI_Request *) ADIOI_Malloc((nprocs_send + nprocs_recv + 1) * sizeof(MPI_Request));
 
         /* post receives */
-        j = 0;
+        /* receive messages into contig_buf, a temporary buffer */
+        buf_ptr = contig_buf;
         for (i = 0; i < nprocs; i++) {
-            if (recv_size[i]) {
-                MPI_Irecv(MPI_BOTTOM, 1, recv_types[j], i, ADIOI_COLL_TAG(i, iter), fd->comm,
-                          requests + j);
-                j++;
+            if (recv_size[i] == 0)
+                continue;
+            if (i != myrank) {
+                if (recv_count[i] > 1) {
+                    MPI_Irecv(buf_ptr, recv_size[i], MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm,
+                              &requests[nreqs++]);
+                    buf_ptr += recv_size[i];
+                } else {
+                    /* recv_count[i] is the number of noncontiguous
+                     * offset-length pairs describing the write requests of
+                     * process i that fall into this aggregator's file domain.
+                     * When recv_count[i] is 1, there is only one such pair,
+                     * meaning the receive message is to be stored
+                     * contiguously. Such message can be received directly into
+                     * write_buf.
+                     */
+                    MPI_Irecv(write_buf + others_req[i].mem_ptrs[start_pos[i]], recv_size[i],
+                              MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, &requests[nreqs++]);
+                }
+            } else if (buftype_is_contig) {
+                /* send/recv to/from self uses memcpy() */
+                MEMCPY_UNPACK(i, (char *) buf + buf_idx[i]);
             }
         }
-        send_req = requests + nprocs_recv;
     }
 
-    /* post sends.
-     * if buftype_is_contig, data can be directly sent from
-     * user buf at location given by buf_idx. else use send_buf.
+    /* Post sends: if buftype_is_contig, data can be directly sent from user
+     * buf at location given by buf_idx. Otherwise, copy write data to send_buf
+     * first and use send_buf to send.
      */
     if (buftype_is_contig) {
-        j = 0;
         for (i = 0; i < nprocs; i++)
-            if (send_size[i]) {
+            if (send_size[i] && i != myrank) {
                 ADIOI_Assert(buf_idx[i] != -1);
-                MPI_Issend(((char *) buf) + buf_idx[i], send_size[i],
-                           MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, send_req + j);
-                j++;
+                MPI_Issend((char *) buf + buf_idx[i], send_size[i],
+                           MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, &requests[nreqs++]);
             }
     } else if (nprocs_send) {
-        /* buftype is not contig */
+        /* If buftype is not contiguous, pack data into send_buf[], including
+         * ones sent to self.
+         */
+        size_t send_total_size = 0;
+        for (i = 0; i < nprocs; i++)
+            send_total_size += send_size[i];
         send_buf = (char **) ADIOI_Malloc(nprocs * sizeof(char *));
         send_buf[0] = (char *) ADIOI_Malloc(send_total_size);
         for (i = 1; i < nprocs; i++)
             send_buf[i] = send_buf[i - 1] + send_size[i - 1];
 
         ADIOI_LUSTRE_Fill_send_buffer(fd, buf, flat_buf, send_buf, offset_list,
-                                      len_list, send_size, send_req,
+                                      len_list, send_size, requests + nreqs,
                                       sent_to_proc, nprocs, myrank,
                                       contig_access_count, striping_info,
                                       send_buf_idx, curr_to_proc, done_to_proc,
                                       iter, buftype_extent);
-        /* the send is done in ADIOI_Fill_send_buffer */
+        /* MPI_Issend calls have been posted in ADIOI_Fill_send_buffer */
+        nreqs += (send_size[myrank]) ? nprocs_send - 1 : nprocs_send;
     }
 
-    /* bug fix from Wei-keng Liao and Kenin Coloma */
     if (fd->atomicity) {
-        j = 0;
+        /* In atomic mode, we must receive write data in the increasing order
+         * of MPI process rank IDs,
+         */
         for (i = 0; i < nprocs; i++) {
-            MPI_Status wkl_status;
-            if (recv_size[i]) {
-                MPI_Recv(MPI_BOTTOM, 1, recv_types[j], i, ADIOI_COLL_TAG(i, iter), fd->comm,
-                         &wkl_status);
-                j++;
+            if (recv_size[i] == 0)
+                continue;
+            if (i != myrank) {
+                MPI_Recv(contig_buf, recv_size[i], MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, &status);
+                MEMCPY_UNPACK(i, contig_buf);
+            } else {
+                /* send/recv to/from self uses memcpy() */
+                char *ptr = (buftype_is_contig) ? (char *) buf + buf_idx[i] : send_buf[i];
+                MEMCPY_UNPACK(i, ptr);
             }
         }
+    } else if (!buftype_is_contig && send_size[myrank]) {
+        /* contents of user buf has been copied into send_buf[myrank] */
+        MEMCPY_UNPACK(myrank, send_buf[myrank]);
     }
 
-    for (i = 0; i < nprocs_recv; i++)
-        MPI_Type_free(recv_types + i);
-    ADIOI_Free(recv_types);
-
+    if (nreqs > 0) {
 #ifdef MPI_STATUSES_IGNORE
-    statuses = MPI_STATUSES_IGNORE;
+        MPI_Waitall(nreqs, requests, MPI_STATUSES_IGNORE);
 #else
-    /* bug fix from Wei-keng Liao and Kenin Coloma */
-    /* +1 to avoid a 0-size malloc */
-    if (fd->atomicity) {
-        statuses = (MPI_Status *) ADIOI_Malloc((nprocs_send + 1) * sizeof(MPI_Status));
-    } else {
-        statuses = (MPI_Status *) ADIOI_Malloc((nprocs_send + nprocs_recv + 1) *
-                                               sizeof(MPI_Status));
+        MPI_Status *statuses = (MPI_Status *) ADIOI_Malloc(nreqs * sizeof(MPI_Status));
+        MPI_Waitall(nreqs, requests, statuses);
+        ADIOI_Free(statuses);
+#endif
     }
-#endif
-
-#ifdef NEEDS_MPI_TEST
-    i = 0;
-    if (fd->atomicity) {
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
-        while (!i)
-            MPI_Testall(nprocs_send, send_req, &i, statuses);
-    } else {
-        while (!i)
-            MPI_Testall(nprocs_send + nprocs_recv, requests, &i, statuses);
-    }
-#else
-    /* bug fix from Wei-keng Liao and Kenin Coloma */
-    if (fd->atomicity)
-        MPI_Waitall(nprocs_send, send_req, statuses);
-    else
-        MPI_Waitall(nprocs_send + nprocs_recv, requests, statuses);
-#endif
-
-#ifndef MPI_STATUSES_IGNORE
-    ADIOI_Free(statuses);
-#endif
     ADIOI_Free(requests);
+
     if (!buftype_is_contig && nprocs_send) {
         ADIOI_Free(send_buf[0]);
         ADIOI_Free(send_buf);
     }
+
+    if (!fd->atomicity) {
+        /* unpack from contig_buf to write_buf */
+        buf_ptr = contig_buf;
+        for (i = 0; i < nprocs; i++) {
+            if (recv_count[i] > 1 && i != myrank) {
+                /* When recv_count[i] == 1, this case has been taken care of
+                 * earlier by receiving the message directly into write_buf.
+                 */
+                MEMCPY_UNPACK(i, buf_ptr);
+                buf_ptr += recv_size[i];
+            }
+        }
+    }
+
+    /* free temporary receive buffer */
+    if (sum_recv > striping_info[0])
+        ADIOI_Free(contig_buf);
 }
 
 #define ADIOI_BUF_INCR \
@@ -1023,10 +1097,9 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, const void *buf,
                                      (unsigned) ((ADIO_Offset) curr_to_proc[p] + size));
                         curr_to_proc[p] += size;
                     ADIOI_BUF_COPY}
-                    if (send_buf_idx[p] == send_size[p]) {
+                    if (send_buf_idx[p] == send_size[p] && p != myrank) {
                         MPI_Issend(send_buf[p], send_size[p], MPI_BYTE, p,
-                                   ADIOI_COLL_TAG(p, iter), fd->comm, requests + jj);
-                        jj++;
+                                   ADIOI_COLL_TAG(p, iter), fd->comm, &requests[jj++]);
                     }
                 } else {
                     ADIOI_Assert((curr_to_proc[p] + len) ==
@@ -1110,7 +1183,7 @@ static void ADIOI_LUSTRE_IterateOneSided(ADIO_File fd, const void *buf, int *str
     stripeParms.segmentLen = ((ADIO_Offset) numStripedAggs) * ((ADIO_Offset) (striping_info[0]));
 
     /* These arrays define the file offsets for the stripes for a given segment - similar
-     * to the concept of file domains in GPFS, essentially file domeains for the segment.
+     * to the concept of file domains in GPFS, essentially file domains for the segment.
      */
     ADIO_Offset *segment_stripe_start =
         (ADIO_Offset *) ADIOI_Malloc(numStripedAggs * sizeof(ADIO_Offset));
@@ -1324,6 +1397,7 @@ static void ADIOI_LUSTRE_IterateOneSided(ADIO_File fd, const void *buf, int *str
                                                segmentLastFileOffset, currentValidDataIndex,
                                                segment_stripe_start, segment_stripe_end,
                                                &holeFoundThisRound, &stripeParms);
+                /* numNonZeroDataOffsets is not used in ADIOI_OneSidedWriteAggregation()? */
             } else {
                 ADIOI_OneSidedWriteAggregation(fd,
                                                (ADIO_Offset *) &
