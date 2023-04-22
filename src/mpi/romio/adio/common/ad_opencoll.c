@@ -260,8 +260,25 @@ static int construct_aggr_list(ADIO_File fd, int *error_code)
             }
             divisor++;
         }
-    } else
-        num_aggr = fd->hints->striping_factor;
+    }
+    else { /* striping_factor <= nprocs */
+        if (fd->hints->striping_factor > fd->hints->cb_nodes)
+            /* striping_factor > cb_nodes */
+            num_aggr = fd->hints->striping_factor;
+        else {
+            /* striping_factor <= cb_nodes */
+            if (fd->hints->cb_nodes % fd->hints->striping_factor == 0)
+                /* cb_nodes is a multiple of striping_factor */
+                num_aggr = fd->hints->cb_nodes;
+            else {
+                /* find the biggest multiple of striping_factor that is less
+                 * than cb_nodes
+                 */
+                num_aggr = fd->hints->cb_nodes / fd->hints->striping_factor;
+                num_aggr *= fd->hints->striping_factor;
+            }
+        }
+    }
 
     /* TODO: num_aggr is for collective writes. Reads should be the number of nodes */
 
@@ -274,14 +291,7 @@ static int construct_aggr_list(ADIO_File fd, int *error_code)
         return 0;
     }
 
-    if (fd->hints->cb_nodes <= 0) {
-        *error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
-                                           myname, __LINE__, MPI_ERR_IO,
-                                           "**ioagnomatch", 0);
-        fd = ADIO_FILE_NULL;
-        return 0;
-    }
-
+    /* overwrite cb_nodes */
     fd->hints->cb_nodes = num_aggr;
     value = (char *) ADIOI_Malloc(12);  /* int has at most 12 digits */
     sprintf(value, "%d", num_aggr);

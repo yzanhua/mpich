@@ -72,10 +72,13 @@ void ADIOI_GEN_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
 
         fd->hints->cb_config_list = NULL;
 
-        /* number of processes that perform I/O in collective I/O */
-        MPL_snprintf(value, MPI_MAX_INFO_VAL + 1, "%d", nprocs);
-        ADIOI_Info_set(info, "cb_nodes", value);
-        fd->hints->cb_nodes = nprocs;
+        /* for Lustre, default is set in construct_aggr_list() */
+        if (fd->file_system != ADIO_LUSTRE) {
+            /* number of processes that perform I/O in collective I/O */
+            MPL_snprintf(value, MPI_MAX_INFO_VAL + 1, "%d", nprocs);
+            ADIOI_Info_set(info, "cb_nodes", value);
+            fd->hints->cb_nodes = nprocs;
+        }
 
         /* hint indicating that no indep. I/O will be performed on this file */
         ADIOI_Info_set(info, "romio_no_indep_rw", "false");
@@ -230,7 +233,9 @@ void ADIOI_GEN_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
              * cb_nodes in the set_view case */
             ADIOI_Info_check_and_install_int(fd, users_info, "cb_nodes",
                                              &(fd->hints->cb_nodes), myname, error_code);
-            if ((fd->hints->cb_nodes <= 0) || (fd->hints->cb_nodes > nprocs)) {
+            /* for Lustre, default is set in construct_aggr_list() */
+            if (fd->file_system != ADIO_LUSTRE &&
+                (fd->hints->cb_nodes <= 0 || fd->hints->cb_nodes > nprocs)) {
                 /* can't ask for more aggregators than mpi processes, though it
                  * might be interesting to think what such oversubscription
                  * might mean... someday */

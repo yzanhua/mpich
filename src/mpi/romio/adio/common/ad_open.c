@@ -155,7 +155,6 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
          * will always use the proper communicator */
         fd->hints->deferred_open = 0;
 
-
     /* On Lustre, if hint cb_config_list was not set by the user, constructing
      * the optimal aggregator rank list requires file stripe count, which can
      * be obtained only when actually opening the file. Thus its construction
@@ -174,7 +173,11 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
     }
     fd->is_open = 0;
     fd->my_cb_nodes_index = -2;
-    fd->is_agg = is_aggregator(rank, fd);
+
+    if (fd->file_system != ADIO_LUSTRE)
+        /* for Lustre fd->is_agg is set in construct_aggr_list() */
+        fd->is_agg = is_aggregator(rank, fd);
+
     /* deferred open used to split the communicator to create an "aggregator
      * communicator", but we only used it as a way to indicate that deferred
      * open happened.  fd->is_open and fd->is_agg are sufficient */
@@ -196,7 +199,6 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
     fd->orig_access_mode = access_mode;
     if (fd->access_mode & ADIO_EXCL)
         fd->access_mode ^= ADIO_EXCL;
-
 
     /* for debugging, it can be helpful to see the hints selected. Some file
      * systes set up the hints in the open call (e.g. lustre) */

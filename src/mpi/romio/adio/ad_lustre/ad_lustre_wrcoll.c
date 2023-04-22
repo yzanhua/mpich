@@ -210,13 +210,11 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
     striping_info[1] = fd->hints->striping_factor;
     striping_info[2] = fd->hints->cb_nodes;
 
-    /* If the user has specified to use a one-sided aggregation method then do
-     * that at this point instead of the two-phase I/O.
-     */
     if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
-        /* If user has specified to use a one-sided aggregation method then do
-         * that at this point instead of using the traditional MPI
-         * point-to-point communication, i.e. MPI_Isend and MPI_Irecv.
+        /* If user has set hint ROMIO_WRITE_AGGMETHOD env variable to to use a
+         * one-sided aggregation method then do that at this point instead of
+         * using the traditional MPI point-to-point communication, i.e.
+         * MPI_Isend and MPI_Irecv.
          */
         ADIOI_LUSTRE_IterateOneSided(fd, buf, striping_info, offset_list, len_list,
                                      contig_access_count, nonzero_nprocs, count,
@@ -229,27 +227,27 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
         int count_my_req_procs, *count_my_req_per_proc;
 
         /* others_req[] is an array of nprocs access structures, one for each
-         * other process whose requests fall into this process's file domain
-         * and is written by this process. */
+         * other process whose requests fall into this process's file domain,
+         * i.e. is written by this process. */
         ADIOI_Access *others_req;
         int count_others_req_procs, *count_others_req_per_proc;
         ADIO_Offset **buf_idx = NULL;
 
-        /* Calculate what portions of this process's write requests that fall
-         * into the file domains of each I/O aggregator.  No inter-process
+        /* Calculate the portions of this process's write requests that fall
+         * into the file domains of each I/O aggregator. No inter-process
          * communication is needed.
          */
         ADIOI_LUSTRE_Calc_my_req(fd, offset_list, len_list, contig_access_count,
                                  striping_info, nprocs, &count_my_req_procs,
                                  &count_my_req_per_proc, &my_req, &buf_idx);
 
-        /* Calculate what parts of requests from other processes fall into this
-         * process's file domain (note only I/O aggregators are assigned file
-         * domains). Inter-process communication is required to construct
+        /* Calculate the portions of all other process's requests fall into
+         * this process's file domain (note only I/O aggregators are assigned
+         * file domains). Inter-process communication is required to construct
          * others_req[], including MPI_Alltoall, MPI_Isend, MPI_Irecv, and
          * MPI_Waitall.
          *
-         * count_others_req_procs = number of processes whose requests
+         * count_others_req_procs is the number of processes whose requests
          * (including this process itself) fall into this process's file
          * domain.
          * count_others_req_per_proc[i] indicates how many noncontiguous
@@ -268,7 +266,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
         ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, nprocs, myrank,
                                     others_req, my_req, offset_list, len_list,
                                     min_st_loc, max_end_loc,
-                                    contig_access_count, striping_info, buf_idx, error_code);
+                                    contig_access_count, striping_info, buf_idx,
+                                    error_code);
 
         /* free all memory allocated */
         ADIOI_Free_others_req(nprocs, count_others_req_per_proc, others_req);
