@@ -206,8 +206,13 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
     }
 
     /* Get Lustre hints information */
-    ADIOI_LUSTRE_Get_striping_info(fd, striping_info, 1);
+    striping_info[0] = fd->hints->striping_unit;
+    striping_info[1] = fd->hints->striping_factor;
+    striping_info[2] = fd->hints->cb_nodes;
 
+    /* If the user has specified to use a one-sided aggregation method then do
+     * that at this point instead of the two-phase I/O.
+     */
     if ((fd->romio_write_aggmethod == 1) || (fd->romio_write_aggmethod == 2)) {
         /* If user has specified to use a one-sided aggregation method then do
          * that at this point instead of using the traditional MPI
@@ -1075,7 +1080,7 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, const void *buf,
              * longer than the single region that processor "p" is responsible
              * for.
              */
-            p = ADIOI_LUSTRE_Calc_aggregator(fd, off, &len, striping_info);
+            p = ADIOI_LUSTRE_Calc_aggregator(fd, off, &len, striping_info[0]);
 
             if (send_buf_idx[p] < send_size[p]) {
                 if (curr_to_proc[p] + len > done_to_proc[p]) {

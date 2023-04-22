@@ -87,42 +87,25 @@ void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd, int *striping_info, int mode)
     striping_info[2] = avail_cb_nodes;
 }
 
-int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off,
-                                 ADIO_Offset * len, int *striping_info)
+int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * len, int stripe_size)
 {
-    int rank_index, rank;
-    ADIO_Offset avail_bytes;
-    int stripe_size = striping_info[0];
-    int avail_cb_nodes = striping_info[2];
+    ADIO_Offset avail_bytes, stripe_id;
 
-    /* Produce the stripe-contiguous pattern for Lustre */
-    rank_index = (int) ((off / stripe_size) % avail_cb_nodes);
+    stripe_id = off / stripe_size;
 
-    /* we index into fd_end with rank_index, and fd_end was allocated to be no
-     * bigger than fd->hins->cb_nodes.   If we ever violate that, we're
-     * overrunning arrays.  Obviously, we should never ever hit this abort
-     */
-    if (rank_index >= fd->hints->cb_nodes)
-        MPI_Abort(MPI_COMM_WORLD, 1);
-
-    avail_bytes = (off / (ADIO_Offset) stripe_size + 1) * (ADIO_Offset) stripe_size - off;
+    avail_bytes = (stripe_id + 1) * stripe_size - off;
     if (avail_bytes < *len) {
-        /* this proc only has part of the requested contig. region */
+        /* The request [off, off+len) has only [off, off+avail_bytes) part
+         * falling into aggregator's file domain */
         *len = avail_bytes;
     }
-    /* map our index to a rank */
-    /* NOTE: FOR NOW WE DON'T HAVE A MAPPING...JUST DO 0..NPROCS_FOR_COLL */
-    rank = fd->hints->ranklist[rank_index];
-
-    return rank;
+    /* map index to cb_node's MPI rank */
+    return fd->hints->ranklist[stripe_id % fd->hints->cb_nodes];
 }
 
 /* ADIOI_LUSTRE_Calc_my_req() - calculate what portions of the access requests
- * of this process are located in the file domains of various processes
- * (including this one)
+ * of this process are located in the file domains of I/O aggregators.
  */
-
-
 void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
                               ADIO_Offset * len_list, int contig_access_count,
                               int *striping_info, int nprocs,
@@ -130,74 +113,83 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
                               int **count_my_req_per_proc_ptr,
                               ADIOI_Access ** my_req_ptr, ADIO_Offset *** buf_idx_ptr)
 {
-    /* Nothing different from ADIOI_Calc_my_req(), except calling
-     * ADIOI_Lustre_Calc_aggregator() instead of the old one */
     int *count_my_req_per_proc, count_my_req_procs;
-    int i, l, proc;
-    size_t memLen;
+    int i, l, proc, *aggr_ranks, stripe_size;
+    size_t nelems;
     ADIO_Offset avail_len, rem_len, curr_idx, off, **buf_idx, *ptr;
+    ADIO_Offset *avail_lens;
     ADIOI_Access *my_req;
+
+    stripe_size = striping_info[0];
 
     *count_my_req_per_proc_ptr = (int *) ADIOI_Calloc(nprocs, sizeof(int));
     count_my_req_per_proc = *count_my_req_per_proc_ptr;
-    /* count_my_req_per_proc[i] gives the no. of contig. requests of this
-     * process in process i's file domain. calloc initializes to zero.
-     * I'm allocating memory of size nprocs, so that I can do an
-     * MPI_Alltoall later on.
+    /* count_my_req_per_proc[i] gives the number of contiguous requests of this
+     * process that fall in process i's file domain.
      */
 
-    /* one pass just to calculate how much space to allocate for my_req;
-     * contig_access_count was calculated way back in ADIOI_Calc_my_off_len()
+    /* First pass just to calculate how much space to allocate for my_req.
+     * contig_access_count has been calculated way back in
+     * ADIOI_Calc_my_off_len()
      */
+    aggr_ranks = (int *) ADIOI_Malloc(contig_access_count * sizeof(int));
+    avail_lens = (ADIO_Offset *) ADIOI_Malloc(contig_access_count * sizeof(ADIO_Offset));
+
+    /* nelems will be the number of offset-length pairs for my_req[] */
+    nelems = 0;
     for (i = 0; i < contig_access_count; i++) {
         /* short circuit offset/len processing if len == 0
          * (zero-byte  read/write
          */
+        /* short circuit offset/len processing if zero-byte read/write. */
         if (len_list[i] == 0)
             continue;
+
         off = offset_list[i];
         avail_len = len_list[i];
-        /* note: we set avail_len to be the total size of the access.
-         * then ADIOI_LUSTRE_Calc_aggregator() will modify the value to return
-         * the amount that was available.
+        /* ADIOI_LUSTRE_Calc_aggregator() modifies the value of avail_len to
+         * return the amount that is only covered by the proc's file domain.
+         * The remaining will still need to determine to whose file domain it
+         * belongs. As ADIOI_LUSTRE_Calc_aggregator() can be expensive for
+         * large value of contig_access_count, keep a copy of the returned
+         * values proc and avail_len in aggr_ranks[] and avail_lens[] to be
+         * used in the next for loop.
          */
-        proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, striping_info);
+        proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, stripe_size);
+        aggr_ranks[i] = proc;
+        avail_lens[i] = avail_len;
         count_my_req_per_proc[proc]++;
+        nelems++;
 
-        /* figure out how many data is remaining in the access
-         * we'll take care of this data (if there is any)
-         * in the while loop below.
+        /* rem_len is the amount of i's offset-length pair that is not covered
+         * by proc's file domain.
          */
         rem_len = len_list[i] - avail_len;
 
         while (rem_len != 0) {
             off += avail_len;   /* point to first remaining byte */
             avail_len = rem_len;        /* save remaining size, pass to calc */
-            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, striping_info);
+            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, stripe_size);
             count_my_req_per_proc[proc]++;
+            nelems++;
             rem_len -= avail_len;       /* reduce remaining length by amount from fd */
         }
     }
 
-    /* buf_idx is relevant only if buftype_is_contig.
-     * buf_idx[i] gives the index into user_buf where data received
-     * from proc 'i' should be placed. This allows receives to be done
-     * without extra buffer. This can't be done if buftype is not contig.
+    /* buf_idx is relevant only if buftype_is_contig.  buf_idx[i] gives the
+     * starting index in user_buf where data will be sent to proc 'i'. This
+     * allows sends to be done without extra buffer.
      */
+    ptr = (ADIO_Offset *) ADIOI_Malloc((nelems * 3 + nprocs) * sizeof(ADIO_Offset));
 
-    memLen = 0;
-    for (i = 0; i < nprocs; i++)
-        memLen += count_my_req_per_proc[i];
-    ptr = (ADIO_Offset *) ADIOI_Malloc((memLen * 3 + nprocs) * sizeof(ADIO_Offset));
-
-    /* initialize buf_idx vectors */
+    /* allocate space for buf_idx */
     buf_idx = (ADIO_Offset **) ADIOI_Malloc(nprocs * sizeof(ADIO_Offset *));
     buf_idx[0] = ptr;
     for (i = 1; i < nprocs; i++)
         buf_idx[i] = buf_idx[i - 1] + count_my_req_per_proc[i - 1] + 1;
-    ptr += memLen + nprocs;     /* "+ nprocs" puts a terminal index at the end */
+    ptr += nelems + nprocs;     /* "+ nprocs" puts a terminal index at the end */
 
-    /* now allocate space for my_req, offset, and len */
+    /* allocate space for my_req and its members offsets and lens */
     *my_req_ptr = (ADIOI_Access *) ADIOI_Malloc(nprocs * sizeof(ADIOI_Access));
     my_req = *my_req_ptr;
     my_req[0].offsets = ptr;
@@ -217,50 +209,46 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
     /* now fill in my_req */
     curr_idx = 0;
     for (i = 0; i < contig_access_count; i++) {
-        /* short circuit offset/len processing if len == 0
-         *      (zero-byte  read/write */
+        /* short circuit offset/len processing if zero-byte read/write. */
         if (len_list[i] == 0)
             continue;
+
         off = offset_list[i];
-        avail_len = len_list[i];
-        proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, striping_info);
+        proc = aggr_ranks[i];
+        avail_len = avail_lens[i];
 
         l = my_req[proc].count;
-
         ADIOI_Assert(l < count_my_req_per_proc[proc]);
         buf_idx[proc][l] = curr_idx;
         curr_idx += avail_len;
-
         rem_len = len_list[i] - avail_len;
 
-        /* store the proc, offset, and len information in an array
-         * of structures, my_req. Each structure contains the
-         * offsets and lengths located in that process's FD,
-         * and the associated count.
+        /* Each my_req[i] contains the number of this process's noncontiguous
+         * requests that fall into process i's file domain. my_req[i].offsets[]
+         * and my_req[i].lens store the offsets and lengths of the requests.
          */
         my_req[proc].offsets[l] = off;
-        ADIOI_Assert(avail_len == (int) avail_len);
-        my_req[proc].lens[l] = (int) avail_len;
+        my_req[proc].lens[l] = avail_len;
         my_req[proc].count++;
 
         while (rem_len != 0) {
             off += avail_len;
             avail_len = rem_len;
-            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, striping_info);
+            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, stripe_size);
 
             l = my_req[proc].count;
             ADIOI_Assert(l < count_my_req_per_proc[proc]);
             buf_idx[proc][l] = curr_idx;
-
             curr_idx += avail_len;
             rem_len -= avail_len;
 
             my_req[proc].offsets[l] = off;
-            ADIOI_Assert(avail_len == (int) avail_len);
-            my_req[proc].lens[l] = (int) avail_len;
+            my_req[proc].lens[l] = avail_len;
             my_req[proc].count++;
         }
     }
+    ADIOI_Free(aggr_ranks);
+    ADIOI_Free(avail_lens);
 
 #ifdef AGG_DEBUG
     for (i = 0; i < nprocs; i++) {

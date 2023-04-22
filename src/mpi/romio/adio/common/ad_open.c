@@ -23,7 +23,7 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
 {
     MPI_File mpi_fh;
     ADIO_File fd;
-    int err, rank, procs;
+    int err, rank, procs, cb_config_list_flag;
     static char myname[] = "ADIO_OPEN";
     int max_error_code;
     MPI_Info dupinfo;
@@ -118,6 +118,14 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
         ADIOI_process_system_hints(fd, ADIOI_syshints);
     }
 
+    /* check whether hint cb_config_list is set by user */
+    cb_config_list_flag = 0;
+    if (info != MPI_INFO_NULL) {
+        char *value = (char *) ADIOI_Malloc(MPI_MAX_INFO_VAL + 1);
+        MPI_Info_get(info, "cb_config_list", MPI_MAX_INFO_VAL, value, &cb_config_list_flag);
+        ADIOI_Free(value);
+    }
+
     ADIOI_incorporate_system_hints(info, ADIOI_syshints, &dupinfo);
     ADIO_SetInfo(fd, dupinfo, &err);
     if (dupinfo != MPI_INFO_NULL) {
@@ -148,12 +156,21 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
         fd->hints->deferred_open = 0;
 
 
-    /* on BlueGene, the cb_config_list is built when hints are processed. No
+    /* On Lustre, if hint cb_config_list was not set by the user, constructing
+     * the optimal aggregator rank list requires file stripe count, which can
+     * be obtained only when actually opening the file. Thus its construction
+     * is delayed to ADIOI_OpenColl(). If user does set the cb_config_list, we
+     * respect that hint.
+     *
+     * on BlueGene, the cb_config_list is built when hints are processed. No
      * one else does that right now */
-    if (fd->hints->ranklist == NULL) {
-        build_cb_config_list(fd, orig_comm, comm, rank, procs, error_code);
-        if (*error_code != MPI_SUCCESS)
-            goto fn_exit;
+    if (fd->file_system != ADIO_LUSTRE || cb_config_list_flag) {
+        if (fd->hints->ranklist == NULL) {
+            build_cb_config_list(fd, orig_comm, comm, rank, procs, error_code);
+            if (*error_code != MPI_SUCCESS)
+                goto fn_exit;
+        }
+        fd->is_agg = is_aggregator(rank, fd);
     }
     fd->is_open = 0;
     fd->my_cb_nodes_index = -2;

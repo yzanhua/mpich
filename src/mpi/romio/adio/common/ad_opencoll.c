@@ -5,6 +5,8 @@
 
 #include "adio.h"
 
+static int construct_aggr_list(ADIO_File fd, int *error_code);
+
 /* Generic version of a "collective open".  Assumes a "real" underlying
  * file system (meaning no wonky consistency semantics like NFS).
  *
@@ -59,7 +61,8 @@ static MPI_Datatype make_stats_type(ADIO_File fd)
 
 void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code)
 {
-    int orig_amode_excl, orig_amode_wronly;
+    char value[MPI_MAX_INFO_VAL + 1];
+    int i, orig_amode_excl, orig_amode_wronly;
     MPI_Comm tmp_comm;
     MPI_Datatype stats_type;    /* deferred open: some processes might not
                                  * open the file, so we'll exchange some
@@ -67,8 +70,17 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
 
     orig_amode_excl = access_mode;
 
-    if (access_mode & ADIO_CREATE) {
-        if (rank == fd->hints->ranklist[0]) {
+    if ((access_mode & ADIO_CREATE) || fd->hints->ranklist == NULL) {
+        /* fd->hints->ranklist is NULL only when the file is on Lustre and
+         * cb_config_list hint is not set in the user info object. Its
+         * construction has been delayed from ADIO_Open() until here. We need
+         * to obtain Lustre file stripe count on root process, in order to
+         * construct aggregator rank list, no matter if create or not for
+         * Lustre.
+         */
+        int root = (fd->hints->ranklist == NULL) ? 0 : fd->hints->ranklist[0];
+
+        if (rank == root) {
             /* remove delete_on_close flag if set */
             if (access_mode & ADIO_DELETE_ON_CLOSE)
                 fd->access_mode = access_mode ^ ADIO_DELETE_ON_CLOSE;
@@ -79,14 +91,14 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
             fd->comm = MPI_COMM_SELF;
             (*(fd->fns->ADIOI_xxx_Open)) (fd, error_code);
             fd->comm = tmp_comm;
-            MPI_Bcast(error_code, 1, MPI_INT, fd->hints->ranklist[0], fd->comm);
+            MPI_Bcast(error_code, 1, MPI_INT, root, fd->comm);
             /* if no error, close the file and reopen normally below */
             if (*error_code == MPI_SUCCESS)
                 (*(fd->fns->ADIOI_xxx_Close)) (fd, error_code);
 
             fd->access_mode = access_mode;      /* back to original */
         } else
-            MPI_Bcast(error_code, 1, MPI_INT, fd->hints->ranklist[0], fd->comm);
+            MPI_Bcast(error_code, 1, MPI_INT, root, fd->comm);
 
         if (*error_code != MPI_SUCCESS) {
             return;
@@ -96,7 +108,32 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
             if (access_mode & ADIO_EXCL)
                 access_mode ^= ADIO_EXCL;
         }
+
+        if (fd->hints->ranklist == NULL) {
+            /* Once the Lustre file stripe count, fd->hints->striping_factor,
+             * is set, we use it to construct the I/O aggregator rank list,
+             * fd->hints->ranklist[].
+             */
+            construct_aggr_list(fd, error_code);
+            if (*error_code != MPI_SUCCESS)
+                return;
+        }
     }
+
+    /* add to fd->info the hint "aggr_list", list of aggregators' rank IDs */
+    value[0] = '\0';
+    for (i = 0; i < fd->hints->cb_nodes; i++) {
+        char str[16];
+        if (i == 0)
+            MPL_snprintf(str, sizeof(value), "%d", fd->hints->ranklist[i]);
+        else
+            MPL_snprintf(str, sizeof(value), " %d", fd->hints->ranklist[i]);
+        if (strlen(value) + strlen(str) > MPI_MAX_INFO_VAL)
+            break;
+        strcat(value, str);
+    }
+    ADIOI_Info_set(fd->info, "aggr_list", value);
+
     fd->blksize = 1024 * 1024 * 4;      /* this large default value should be good for
                                          * most file systems.  any ROMIO driver is free
                                          * to stat the file and find an optimial value */
@@ -104,7 +141,6 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
     /* if we are doing deferred open, non-aggregators should return now */
     if (fd->hints->deferred_open) {
         if (!(fd->is_agg)) {
-            char value[MPI_MAX_INFO_VAL + 1];
             /* we might have turned off EXCL for the aggregators.
              * restore access_mode that non-aggregators get the right
              * value from get_amode */
@@ -180,5 +216,255 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
 
     /* sync optimization: we can omit the fsync() call if we do no writes */
     fd->dirty_write = 0;
-
 }
+
+/*----< construct_aggr_list() >----------------------------------------------*/
+static int construct_aggr_list(ADIO_File fd, int *error_code)
+{
+    int i, j, rank, nprocs, num_aggr, my_procname_len;
+    int *all_procname_lens = NULL;
+    char *value, my_procname[MPI_MAX_PROCESSOR_NAME];
+    char **all_procnames = NULL;
+    static char myname[] = "ADIO_OPENCOLL construct_aggr_list";
+
+    MPI_Comm_size(fd->comm, &nprocs);
+    MPI_Comm_rank(fd->comm, &rank);
+
+    /* at this moment, only root process has obtained striping_factor */
+    MPI_Bcast(&fd->hints->striping_factor, 1, MPI_INT, 0, fd->comm);
+
+    /* When number of MPI processes is less than striping_factor */
+    if (fd->hints->striping_factor > nprocs) {
+        /* Find the max number less than nprocs that divides striping_factor.
+         * An naive way is:
+         *     num_aggr = nprocs;
+         *     while (fd->hints->striping_factor % num_aggr > 0)
+         *         num_aggr--;
+         * Below is equivalent, but faster.
+         */
+        int divisor = 2;
+        num_aggr = 1;
+        /* try to divise */
+        while (fd->hints->striping_factor >= divisor * divisor) {
+            if ((fd->hints->striping_factor % divisor) == 0) {
+                if (fd->hints->striping_factor / divisor <= nprocs) {
+                    /* The value is found ! */
+                    num_aggr = fd->hints->striping_factor / divisor;
+                    break;
+                }
+                /* if divisor is less than nprocs, divisor is a solution, but
+                 * it is not sure that it is the best one
+                 */
+                else if (divisor <= nprocs)
+                    num_aggr = divisor;
+            }
+            divisor++;
+        }
+    } else
+        num_aggr = fd->hints->striping_factor;
+
+    /* TODO: num_aggr is for collective writes. Reads should be the number of nodes */
+
+    fd->hints->ranklist = (int *) ADIOI_Malloc(num_aggr * sizeof(int));
+    if (fd->hints->ranklist == NULL) {
+        *error_code = MPIO_Err_create_code(*error_code,
+                                           MPIR_ERR_RECOVERABLE, myname,
+                                           __LINE__, MPI_ERR_OTHER,
+                                           "**nomem2", 0);
+        return 0;
+    }
+
+    if (fd->hints->cb_nodes <= 0) {
+        *error_code = MPIO_Err_create_code(MPI_SUCCESS, MPIR_ERR_RECOVERABLE,
+                                           myname, __LINE__, MPI_ERR_IO,
+                                           "**ioagnomatch", 0);
+        fd = ADIO_FILE_NULL;
+        return 0;
+    }
+
+    fd->hints->cb_nodes = num_aggr;
+    value = (char *) ADIOI_Malloc(12);  /* int has at most 12 digits */
+    sprintf(value, "%d", num_aggr);
+    ADIOI_Info_set(fd->info, "cb_nodes", value);
+    ADIOI_Free(value);
+
+    MPI_Get_processor_name(my_procname, &my_procname_len);
+
+    if (rank == 0) {
+        /* process 0 collects all procnames */
+        all_procnames = (char **) ADIOI_Malloc(nprocs * sizeof(char *));
+        if (all_procnames == NULL) {
+            *error_code = MPIO_Err_create_code(*error_code,
+                                               MPIR_ERR_RECOVERABLE, myname,
+                                               __LINE__, MPI_ERR_OTHER,
+                                               "**nomem2", 0);
+            return 0;
+        }
+
+        all_procname_lens = (int *) ADIOI_Malloc(nprocs * sizeof(int));
+        if (all_procname_lens == NULL) {
+            ADIOI_Free(all_procnames);
+            *error_code = MPIO_Err_create_code(*error_code,
+                                               MPIR_ERR_RECOVERABLE, myname,
+                                                __LINE__, MPI_ERR_OTHER,
+                                                "**nomem2", 0);
+            return 0;
+        }
+    }
+    /* gather lengths first */
+    MPI_Gather(&my_procname_len, 1, MPI_INT, all_procname_lens, 1, MPI_INT, 0,
+               fd->comm);
+
+    if (rank == 0) {
+        int *disp;
+        size_t alloc_size = 0;
+
+        for (i = 0; i < nprocs; i++)
+            alloc_size += ++all_procname_lens[i];
+
+        all_procnames[0] = (char *) ADIOI_Malloc(alloc_size);
+        if (all_procnames[0] == NULL) {
+            ADIOI_Free(all_procname_lens);
+            ADIOI_Free(all_procnames);
+            *error_code = MPIO_Err_create_code(*error_code,
+                                               MPIR_ERR_RECOVERABLE, myname,
+                                               __LINE__, MPI_ERR_OTHER,
+                                               "**nomem2", 0);
+            return 0;
+        }
+
+        /* Construct displacement array for the MPI_Gatherv, as each process
+         * may have a different length for its process name.
+         */
+        disp = (int *) ADIOI_Malloc(nprocs * sizeof(int));
+        disp[0] = 0;
+        for (i = 1; i < nprocs; i++) {
+            all_procnames[i] = all_procnames[i - 1] + all_procname_lens[i - 1];
+            disp[i] = disp[i - 1] + all_procname_lens[i - 1];
+        }
+
+        /* gather all process names */
+        MPI_Gatherv(my_procname, my_procname_len + 1, MPI_CHAR,
+                    all_procnames[0], all_procname_lens, disp, MPI_CHAR, 0,
+                    fd->comm);
+
+        ADIOI_Free(disp);
+        ADIOI_Free(all_procname_lens);
+    } else
+        MPI_Gatherv(my_procname, my_procname_len + 1, MPI_CHAR,
+                    NULL, NULL, NULL, MPI_CHAR, 0, fd->comm);
+
+    if (rank == 0) {
+        int n, last, num_nodes;
+        char **node_names;
+        int *nprocs_per_node;
+        int **ranks_per_node;
+        int *node_ids;
+
+        /* number of MPI processes running on each node */
+        nprocs_per_node = (int *) ADIOI_Malloc(nprocs * sizeof(int));
+
+        /* compute node IDs of MPI processes */
+        node_ids = (int *) ADIOI_Malloc(nprocs * sizeof(int));
+
+        /* array of unique host names (compute nodes) */
+        node_names = (char **) ADIOI_Malloc(nprocs * sizeof(char *));
+
+        /* calculate nprocs_per_node[] and node_ids[] */
+        last = 0;
+        num_nodes = 0;
+        for (i = 0; i < nprocs; i++) {
+            n = last;
+            for (j = 0; j < num_nodes; j++) {
+                /* check if [i] has already appeared in [] */
+                if (!strcmp(all_procnames[i], node_names[n])) { /* found */
+                    node_ids[i] = n;
+                    nprocs_per_node[n]++;
+                    break;
+                }
+                n = (n == num_nodes - 1) ? 0 : n + 1;
+            }
+            if (j < num_nodes)  /* found, next iteration, start with node n */
+                last = n;
+            else {      /* not found, j == num_nodes, add a new node */
+                node_names[j] = ADIOI_Strdup(all_procnames[i]);
+                nprocs_per_node[j] = 1;
+                node_ids[i] = j;
+                last = j;
+                num_nodes++;
+            }
+        }
+        /* num_nodes is now the number of compute nodes (unique node names) */
+
+        for (i = 0; i < num_nodes; i++)
+            ADIOI_Free(node_names[i]);
+        ADIOI_Free(node_names);
+        ADIOI_Free(all_procnames[0]);
+        ADIOI_Free(all_procnames);
+
+        /* construct rank IDs of MPI processes running on each node */
+        ranks_per_node = (int **) ADIOI_Malloc(num_nodes * sizeof(int *));
+        ranks_per_node[0] = (int *) ADIOI_Malloc(nprocs * sizeof(int));
+        for (i = 1; i < num_nodes; i++)
+            ranks_per_node[i] = ranks_per_node[i - 1] + nprocs_per_node[i - 1];
+        for (i = 0; i < num_nodes; i++)
+            nprocs_per_node[i] = 0;
+
+        /* populate ranks_per_node[] */
+        for (i = 0; i < nprocs; i++) {
+            n = node_ids[i];
+            ranks_per_node[n][nprocs_per_node[n]] = i;
+            nprocs_per_node[n]++;
+        }
+        ADIOI_Free(node_ids);
+
+        if (num_aggr >= num_nodes) {
+            /* When number of aggregators is more than number of compute nodes,
+             * pick processes (spread evenly) from each node to be aggregators.
+             */
+            int num = num_aggr / num_nodes;
+
+            /* number of processes selected in node n */
+            num = (num_aggr % num_nodes) ? num + 1 : num;
+            for (i = 0; i < num_aggr; i++) {
+                int stride;
+                n = i % num_nodes;      /* node ID */
+                if (num >= nprocs_per_node[n])
+                    stride = 1;
+                else
+                    stride = nprocs_per_node[n] / num;
+                fd->hints->ranklist[i] = ranks_per_node[n][i / num_nodes * stride];
+            }
+        } else {
+            /* When number of aggregators is less than number of compute nodes,
+             * select evenly spread compute nodes and pick first process of
+             * selected node to be aggregators.
+             */
+            int stride = num_nodes / num_aggr;
+            for (i = 0; i < num_aggr; i++)
+                fd->hints->ranklist[i] = ranks_per_node[i * stride][0];
+        }
+
+        /* TODO: we can keep these two arrays in case for dynamic construction
+         * of fd->hints->ranklist[], such as in group-cyclic file domain
+         * assignment method, used in each collective write call.
+         */
+        ADIOI_Free(nprocs_per_node);
+        ADIOI_Free(ranks_per_node[0]);
+        ADIOI_Free(ranks_per_node);
+    }
+
+    MPI_Bcast(fd->hints->ranklist, fd->hints->cb_nodes, MPI_INT, 0, fd->comm);
+
+    /* check whether this process is selected as an I/O aggregator */
+    fd->is_agg = 0;
+    for (i = 0; i < num_aggr; i++) {
+        if (rank == fd->hints->ranklist[i]) {
+            fd->is_agg = 1;
+            break;
+        }
+    }
+
+    return 0;
+}
+
