@@ -87,6 +87,5 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
 void ADIOI_LUSTRE_Free_my_req(int nprocs, int *count_my_req_per_proc,
                               ADIOI_Access * my_req, ADIO_Offset ** buf_idx);
 
-int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off,
-                                 ADIO_Offset * len, int *striping_info);
+int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * len, int stripe_size);
 #endif /* AD_LUSTRE_H_INCLUDED */
