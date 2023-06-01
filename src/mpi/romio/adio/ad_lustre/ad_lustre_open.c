@@ -71,6 +71,13 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
 
     MPI_Comm_rank(fd->comm, &myrank);
 
+if (myrank == 0) {
+    if (fd->access_mode & ADIO_CREATE)
+        printf("%4d: %s line %d - Lustre file create ---- %s\n",myrank,__func__,__LINE__,fd->filename);
+    else
+        printf("%4d: %s line %d - Lustre file open   ---- %s\n",myrank,__func__,__LINE__,fd->filename);
+}
+
     if (fd->perm == ADIO_PERM_NULL) {
         old_mask = umask(022);
         umask(old_mask);
