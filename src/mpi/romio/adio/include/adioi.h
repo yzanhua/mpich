@@ -71,6 +71,7 @@ struct ADIOI_Hints_struct {
             int dtype_write;
         } pvfs2;
         struct {
+            int num_osts;
             int co_ratio;
             int coll_threshold;
             int lock_ahead_read;
