@@ -152,6 +152,9 @@ static void ADIOI_LUSTRE_IOContig(ADIO_File fd, const void *buf, MPI_Aint count,
     static char myname[] = "ADIOI_LUSTRE_IOCONTIG";
     char *p;
 
+// err = 0; goto fn_exit;
+// int ost = (offset/fd->hints->striping_unit) % fd->hints->striping_factor;
+// int rank; MPI_Comm_rank(MPI_COMM_WORLD,&rank); printf("%4d: %s offset=%6lld MB len=%6d MB OST=%3d\n",rank,__func__,offset/1048576, count/1048576,ost);
     if (count == 0) {
         err = 0;
         goto fn_exit;
