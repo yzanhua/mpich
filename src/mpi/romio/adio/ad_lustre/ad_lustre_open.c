@@ -4,6 +4,7 @@
  */
 
 #include "ad_lustre.h"
+#include <lustre/lustreapi.h>
 
 /* what is the basis for this define?
  * what happens if there are more than 1k UUIDs? */
@@ -12,6 +13,51 @@
 
 int ADIOI_LUSTRE_clear_locks(ADIO_File fd);     /* in ad_lustre_lock.c */
 int ADIOI_LUSTRE_request_only_lock_ioctl(ADIO_File fd); /* in ad_lustre_lock.c */
+
+static int __u32_compare(const void *a, const void *b)
+{
+     if (*(__u32*)a > *(__u32*)b) return (1);
+     if (*(__u32*)a < *(__u32*)b) return (-1);
+     return (0);
+}
+#ifndef MAX
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
+#endif
+static void *alloc_lum()
+{
+    int v1, v3, join;
+
+    v1 = sizeof(struct lov_user_md_v1) +
+         LOV_MAX_STRIPE_COUNT * sizeof(struct lov_user_ost_data_v1);
+    v3 = sizeof(struct lov_user_md_v3) +
+         LOV_MAX_STRIPE_COUNT * sizeof(struct lov_user_ost_data_v1);
+
+    return malloc(MAX(v1, v3));
+}
+static int num_uniq_osts(const char *path)
+{
+    struct lov_user_md *lum_file = NULL;
+    int rc, i, num;
+    __u32 *ost_idx;
+
+    lum_file = alloc_lum();
+
+    rc = llapi_file_get_stripe(path, lum_file);
+    assert(rc == 0);
+
+    ost_idx = (__u32*) malloc(lum_file->lmm_stripe_count * sizeof(__u32));
+    for (i=0; i<lum_file->lmm_stripe_count; i++)
+        ost_idx[i] = lum_file->lmm_objects[i].l_ost_idx;
+    qsort(ost_idx, lum_file->lmm_stripe_count, sizeof(__u32), __u32_compare);
+    num = 0;
+    for (i=1; i<lum_file->lmm_stripe_count; i++) {
+        if (ost_idx[i] > ost_idx[num]) ost_idx[++num] = ost_idx[i];
+    }
+    num++;
+    free(ost_idx);
+    free(lum_file);
+    return num;
+}
 
 void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
 {
@@ -131,6 +177,7 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
             fd->hints->striping_unit = lum->lmm_stripe_size;
             fd->hints->striping_factor = lum->lmm_stripe_count;
             fd->hints->start_iodevice = lum->lmm_stripe_offset;
+            fd->hints->fs_hints.lustre.num_osts = num_uniq_osts(fd->filename);
         }
     }
 
