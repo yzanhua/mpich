@@ -210,6 +210,16 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
      * gpfs blocksize not sensible */
     ADIOI_Assert(fd->blksize > 0);
 
+    /* set file striping hints */
+    MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_unit);
+    ADIOI_Info_set(fd->info, "striping_unit", value);
+
+    MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_factor);
+    ADIOI_Info_set(fd->info, "striping_factor", value);
+
+    MPL_snprintf(value, sizeof(value), "%d", fd->hints->start_iodevice);
+    ADIOI_Info_set(fd->info, "start_iodevice", value);
+
     /* for deferred open: this process has opened the file (because if we are
      * not an aggregaor and we are doing deferred open, we returned earlier)*/
     fd->is_open = 1;

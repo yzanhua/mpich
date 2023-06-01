@@ -15,7 +15,7 @@ int ADIOI_LUSTRE_request_only_lock_ioctl(ADIO_File fd); /* in ad_lustre_lock.c *
 
 void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
 {
-    int perm, old_mask, amode, amode_direct;
+    int perm, old_mask, amode, amode_direct, root;
     int lumlen, myrank, flag, set_layout = 0, err;
     struct lov_user_md *lum = NULL;
     char *value;
@@ -80,13 +80,15 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
     if (fd->fd_sys == -1)
         goto fn_exit;
 
+    root = (fd->hints->ranklist == NULL) ? 0 : fd->hints->ranklist[0];
+
     /* we can only set these hints on new files */
     /* It was strange and buggy to open the file in the hint path.  Instead,
      * we'll apply the file tunings at open time */
     if ((amode & O_CREAT) && set_layout) {
         /* if user has specified striping info, first aggregator tries to set
          * it */
-        if (myrank == fd->hints->ranklist[0] || fd->comm == MPI_COMM_SELF) {
+        if (myrank == root || fd->comm == MPI_COMM_SELF) {
             lum->lmm_magic = LOV_USER_MAGIC;
             lum->lmm_pattern = 0;
             /* crude check for overflow of lustre internal datatypes.
@@ -114,28 +116,22 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
         }       /* End of striping parameters validation */
     }
 
-    /* Pascal Deveze reports that, even though we pass a
-     * "GETSTRIPE" (read) flag to the ioctl, if some of the values of this
-     * struct are uninitialized, the call can give an error.  zero it out in case
-     * there are other members that must be initialized and in case
-     * lov_user_md struct changes in future */
-    memset(lum, 0, lumlen);
-    lum->lmm_magic = LOV_USER_MAGIC;
-    err = ioctl(fd->fd_sys, LL_IOC_LOV_GETSTRIPE, (void *) lum);
-    if (!err) {
-
-        fd->hints->striping_unit = lum->lmm_stripe_size;
-        MPL_snprintf(value, value_sz, "%d", lum->lmm_stripe_size);
-        ADIOI_Info_set(fd->info, "striping_unit", value);
-
-        fd->hints->striping_factor = lum->lmm_stripe_count;
-        MPL_snprintf(value, value_sz, "%d", lum->lmm_stripe_count);
-        ADIOI_Info_set(fd->info, "striping_factor", value);
-
-        fd->hints->start_iodevice = lum->lmm_stripe_offset;
-        MPL_snprintf(value, value_sz, "%d", lum->lmm_stripe_offset);
-        ADIOI_Info_set(fd->info, "start_iodevice", value);
-
+    if (myrank == root || fd->comm == MPI_COMM_SELF) {
+        /* Pascal Deveze reports that, even though we pass a "GETSTRIPE" (read)
+         * flag to the ioctl, if some of the values of this struct are
+         * uninitialized, the call can give an error.  zero it out in case
+         * there are other members that must be initialized and in case
+         * lov_user_md struct changes in future.
+         */
+        memset(lum, 0, lumlen);
+        lum->lmm_magic = LOV_USER_MAGIC;
+        err = ioctl(fd->fd_sys, LL_IOC_LOV_GETSTRIPE, (void *) lum);
+        if (!err) {
+            /* striping hints will be set later after return to ADIO_Open() */
+            fd->hints->striping_unit = lum->lmm_stripe_size;
+            fd->hints->striping_factor = lum->lmm_stripe_count;
+            fd->hints->start_iodevice = lum->lmm_stripe_offset;
+        }
     }
 
     if (fd->access_mode & ADIO_APPEND)
