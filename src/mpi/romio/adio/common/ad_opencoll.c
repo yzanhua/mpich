@@ -70,13 +70,12 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
 
     orig_amode_excl = access_mode;
 
-    if ((access_mode & ADIO_CREATE) || fd->hints->ranklist == NULL) {
-        /* fd->hints->ranklist is NULL only when the file is on Lustre and
-         * cb_config_list hint is not set in the user info object. Its
-         * construction has been delayed from ADIO_Open() until here. We need
-         * to obtain Lustre file stripe count on root process, in order to
-         * construct aggregator rank list, no matter if create or not for
-         * Lustre.
+    if ((access_mode & ADIO_CREATE) || (fd->file_system == ADIO_LUSTRE)) {
+        /* root process creates the file first, followed by all processes open
+         * the file.
+         * For Lustre, we need to obtain file striping info (striping_factor,
+         * striping_unit, and num_osts) in order to select the I/O aggregators
+         * in fd->hints->ranklist, no matter its is open or create mode.
          */
         int root = (fd->hints->ranklist == NULL) ? 0 : fd->hints->ranklist[0];
 
@@ -104,15 +103,15 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
             return;
         } else {
             /* turn off CREAT (and EXCL if set) for real multi-processor open */
-            access_mode ^= ADIO_CREATE;
+            if (access_mode & ADIO_CREATE)
+                access_mode ^= ADIO_CREATE;
             if (access_mode & ADIO_EXCL)
                 access_mode ^= ADIO_EXCL;
         }
 
-        if (fd->hints->ranklist == NULL) {
-            /* Once the Lustre file stripe count, fd->hints->striping_factor,
-             * is set, we use it to construct the I/O aggregator rank list,
-             * fd->hints->ranklist[].
+        if (fd->file_system == ADIO_LUSTRE) {
+            /* Use file striping count and number of unique OSTs to construct
+             * the I/O aggregator rank list, fd->hints->ranklist[].
              */
             construct_aggr_list(fd, error_code);
             if (*error_code != MPI_SUCCESS)
@@ -134,9 +133,9 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
     }
     ADIOI_Info_set(fd->info, "aggr_list", value);
 
-    fd->blksize = 1024 * 1024 * 4;      /* this large default value should be good for
-                                         * most file systems.  any ROMIO driver is free
-                                         * to stat the file and find an optimial value */
+    fd->blksize = 1024 * 1024 * 4;
+    /* this large default value should be good for most file systems. any ROMIO
+     * driver is free to stat the file and find an optimal value */
 
     /* if we are doing deferred open, non-aggregators should return now */
     if (fd->hints->deferred_open) {
@@ -145,6 +144,13 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
              * restore access_mode that non-aggregators get the right
              * value from get_amode */
             fd->access_mode = orig_amode_excl;
+
+            if (fd->file_system == ADIO_LUSTRE)
+                /* For Lustre, broadcasting file striping info has been done in
+                 * construct_aggr_list().
+                 */
+                return;
+
             /* In file-system specific open, a driver might collect some
              * information via stat().  Deferred open means not every process
              * participates in fs-specific open, but they all participate in
@@ -154,10 +160,8 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
             stats_type = make_stats_type(fd);
             MPI_Bcast(MPI_BOTTOM, 1, stats_type, fd->hints->ranklist[0], fd->comm);
             ADIOI_Assert(fd->blksize > 0);
-            /* some file systems (e.g. lustre) will inform the user via the
-             * info object about the file configuration.  deferred open,
-             * though, skips that step for non-aggregators.  we do the
-             * info-setting here */
+
+            /* set file striping hints */
             MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_unit);
             ADIOI_Info_set(fd->info, "striping_unit", value);
 
@@ -200,28 +204,31 @@ void ADIOI_GEN_OpenColl(ADIO_File fd, int rank, int access_mode, int *error_code
     if (fd->access_mode != orig_amode_excl)
         fd->access_mode = orig_amode_excl;
 
-    /* broadcast information to all processes in
-     * communicator, not just those who participated in open */
+    if (fd->file_system != ADIO_LUSTRE) {
+        /* broadcast information to all processes in communicator, not just
+         * those who participated in open.
+         * For Lustre, this broadcast has been done in construct_aggr_list().
+         */
+        stats_type = make_stats_type(fd);
+        MPI_Bcast(MPI_BOTTOM, 1, stats_type, fd->hints->ranklist[0], fd->comm);
+        MPI_Type_free(&stats_type);
+        /* file domain code will get terribly confused in a hard-to-debug way
+         * if gpfs blocksize not sensible */
+        ADIOI_Assert(fd->blksize > 0);
 
-    stats_type = make_stats_type(fd);
-    MPI_Bcast(MPI_BOTTOM, 1, stats_type, fd->hints->ranklist[0], fd->comm);
-    MPI_Type_free(&stats_type);
-    /* file domain code will get terribly confused in a hard-to-debug way if
-     * gpfs blocksize not sensible */
-    ADIOI_Assert(fd->blksize > 0);
+        /* set file striping hints */
+        MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_unit);
+        ADIOI_Info_set(fd->info, "striping_unit", value);
 
-    /* set file striping hints */
-    MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_unit);
-    ADIOI_Info_set(fd->info, "striping_unit", value);
+        MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_factor);
+        ADIOI_Info_set(fd->info, "striping_factor", value);
 
-    MPL_snprintf(value, sizeof(value), "%d", fd->hints->striping_factor);
-    ADIOI_Info_set(fd->info, "striping_factor", value);
-
-    MPL_snprintf(value, sizeof(value), "%d", fd->hints->start_iodevice);
-    ADIOI_Info_set(fd->info, "start_iodevice", value);
+        MPL_snprintf(value, sizeof(value), "%d", fd->hints->start_iodevice);
+        ADIOI_Info_set(fd->info, "start_iodevice", value);
+    }
 
     /* for deferred open: this process has opened the file (because if we are
-     * not an aggregaor and we are doing deferred open, we returned earlier)*/
+     * not an aggregator and we are doing deferred open, we returned earlier)*/
     fd->is_open = 1;
 
     /* sync optimization: we can omit the fsync() call if we do no writes */
