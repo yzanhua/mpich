@@ -14,7 +14,7 @@ int ADIO_Type_create_subarray(int ndims,
 {
     MPI_Aint extent, disp, size, lb;
     int i, blklen;
-    MPI_Datatype tmp1, tmp2, tmp_type;
+    MPI_Datatype tmp1, tmp2;
 
     MPI_Type_get_extent(oldtype, &lb, &extent);
 
@@ -80,11 +80,10 @@ int ADIO_Type_create_subarray(int ndims,
 
     blklen = 1;
 
-    MPI_Type_create_struct(1, &blklen, &disp, &tmp1, &tmp_type);
+    MPI_Type_create_struct(1, &blklen, &disp, &tmp1, &tmp2);
 
-    MPI_Type_create_resized(tmp_type, 0, extent, newtype);
+    MPI_Type_create_resized(tmp2, 0, extent, newtype);
 
-    MPI_Type_free(&tmp_type);
     MPI_Type_free(&tmp1);
     MPI_Type_free(&tmp2);
 
