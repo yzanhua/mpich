@@ -59,7 +59,7 @@ int main(int argc, char **argv)
         MPI_Bcast(filename, len + 10, MPI_CHAR, 0, MPI_COMM_WORLD);
     }
 
-    buf = (int *) malloc(SIZE);
+    buf = (int *) calloc(SIZE, 1);
     nints = SIZE / sizeof(int);
 
     /* each process opens a separate file called filename.'myrank' */

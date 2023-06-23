@@ -66,6 +66,9 @@ int main(int argc, char **argv)
         handle_error(errcode, "MPI_File_open");
     }
 
+    for (i = 0; i < 1024; i++)
+        buf[i] = mynod;
+
     errcode = MPI_File_write(fh, buf, 1024, MPI_INT, &status);
     if (errcode != MPI_SUCCESS) {
         handle_error(errcode, "MPI_File_write");

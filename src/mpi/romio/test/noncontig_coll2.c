@@ -166,7 +166,6 @@ int cb_gather_name_array(MPI_Comm comm, ADIO_cb_name_array * arrayp)
         /* no longer need the displacements or lengths */
         free(disp);
         free(procname_len);
-
 #ifdef CB_CONFIG_LIST_DEBUG
         for (i = 0; i < commsize; i++) {
             fprintf(stderr, "name[%d] = %s\n", i, procname[i]);
@@ -350,6 +349,12 @@ int main(int argc, char **argv)
     }
     free(filename);
     free(cb_config_string);
+    if (array->names != NULL) {
+        for (i = 0; i < nprocs; i++)
+            free(array->names[i]);
+        free(array->names);
+    }
+    free(array);
     MPI_Finalize();
     return (sum_errs > 0);
 }
