@@ -62,7 +62,12 @@ int main(int argc, char **argv)
     nints = SIZE / sizeof(int);
     buf = (int *) calloc(nints, sizeof(int));
 
-    /* each process opens a separate file called filename.'myrank' */
+    /* allocate and initialize I/O buffer */
+    buf = (int *) malloc(nints * sizeof(int));
+    for (i=0; i<nints; i++)
+        buf[i] = rank;
+
+    /* each process opens a separate file called filename.'my rank' */
     tmp = (char *) malloc(len + 10);
     strcpy(tmp, filename);
     sprintf(filename, "%s.%d", tmp, rank);
