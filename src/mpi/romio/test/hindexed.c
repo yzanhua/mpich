@@ -222,6 +222,7 @@ int main(int argc, char **argv)
                     fprintf(stderr, "expected %c got %c at [%d][%d]\n",
                             *ptr, compare_buf[i][j], i, j);
                     nr_errors++;
+                    break;
                 }
                 ptr++;
             }

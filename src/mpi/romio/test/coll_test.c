@@ -192,6 +192,7 @@ int main(int argc, char **argv)
             errs++;
             fprintf(stderr, "Process %d, readbuf %d, writebuf %d, i %d\n", mynod, readbuf[i],
                     writebuf[i], i);
+            break;
         }
     }
 
