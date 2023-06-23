@@ -11,7 +11,7 @@ prefix=@prefix@
 exec_prefix=@exec_prefix@
 bindir=@bindir@
 mpirun="@MPIRUN@"
-valgrind_opt="libtool --mode=execute /usr/bin/valgrind --quiet --leak-check=full"
+# valgrind_opt="libtool --mode=execute /usr/bin/valgrind --quiet --leak-check=full"
 
 STOPFILE=${MPITEST_STOPTEST:-"$HOME/.stopmpichtests"}
 #
@@ -320,7 +320,7 @@ CleanExe hindexed
 #	-offm 8 -hints romio_cb_write enable -fname $FILENAME
 #echo '**** Testing write_all_test (run 2)****'
 #$mpirun -np 4 ${valgrind_opt} ./write_all_test -nzp 2 -zplace 2 -nzw 2 -naw 2 -size 100 \
-#	-offm 4 -hints romio_cb_write enable -fname $FILENAME
+#	-offm 4 ${valgrind_opt} -hints romio_cb_write enable -fname $FILENAME
 #CleanExe write_all_test
 OutTime
 if [ $subset_only -eq 0 ] ; then
@@ -403,6 +403,7 @@ testfiles="$testfiles darray_read.out"
 MakeExe darray_read
 echo '**** Testing darray_read ****'
 $mpirun -np 4 ${valgrind_opt} ./darray_read -fname $FILENAME
+>>>>>>> 1e9c0faf (add test run option to use valgrind)
 CleanExe darray_read
 OutTime
 MakeExe syshints
