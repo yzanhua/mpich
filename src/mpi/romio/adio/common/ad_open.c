@@ -155,15 +155,14 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
          * will always use the proper communicator */
         fd->hints->deferred_open = 0;
 
-    /* On Lustre, if hint cb_config_list was not set by the user, constructing
+    /* On Lustre, ignore hint cb_config_list if set by the user. Constructing
      * the optimal aggregator rank list requires file stripe count, which can
      * be obtained only when actually opening the file. Thus its construction
-     * is delayed to ADIOI_OpenColl(). If user does set the cb_config_list, we
-     * respect that hint.
+     * is delayed to ADIOI_OpenColl().
      *
-     * on BlueGene, the cb_config_list is built when hints are processed. No
+     * On BlueGene, the cb_config_list is built when hints are processed. No
      * one else does that right now */
-    if (fd->file_system != ADIO_LUSTRE || cb_config_list_flag) {
+    if (fd->file_system != ADIO_LUSTRE && cb_config_list_flag) {
         if (fd->hints->ranklist == NULL) {
             build_cb_config_list(fd, orig_comm, comm, rank, procs, error_code);
             if (*error_code != MPI_SUCCESS)
@@ -297,7 +296,7 @@ static int build_cb_config_list(ADIO_File fd,
     int *tmp_ranklist;
     int rank_ct;
     char *value;
-    static char myname[] = "ADIO_OPEN cb_config_list";
+    static char myname[] = "ADIO_OPEN build_cb_config_list";
 
     /* gather the processor name array if we don't already have it */
     /* this has to be done early in ADIO_Open so that we can cache the name
