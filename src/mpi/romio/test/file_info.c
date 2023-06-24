@@ -80,7 +80,7 @@ int main(int argc, char **argv)
     MPI_Info info, info_used;
     char *filename, key[MPI_MAX_INFO_KEY], value[MPI_MAX_INFO_VAL];
     hint_defaults *defaults;
-    int ret;
+    int ret, is_lustre = 0;
 
     MPI_Init(&argc, &argv);
 
@@ -214,6 +214,9 @@ int main(int argc, char **argv)
                                 value, defaults->cb_config_list);
                 }
 #endif
+            } else if (!strcmp("romio_filesystem_type", key)) {
+                if (!strcmp(value, "LUSTRE:"))
+                    is_lustre = 1;
             }
             /* don't care about the defaults for these keys */
             else if (!strcmp("romio_cb_pfr", key)) {
@@ -227,6 +230,9 @@ int main(int argc, char **argv)
             }
         }
     } else {
+        MPI_Info_get(info_used, "romio_filesystem_type", MPI_MAX_INFO_VAL - 1, value, &flag);
+        if (flag && !strcmp(value, "LUSTRE:"))
+            is_lustre = 1;
         MPI_Info_get(info_used, "striping_factor", MPI_MAX_INFO_VAL - 1, value, &flag);
         if (flag)
             default_striping_factor = atoi(value);
@@ -313,7 +319,7 @@ int main(int argc, char **argv)
         if (!mynod)
             fprintf(stderr, "Process %d, key = %s, value = %s\n", mynod, key, value);
 #endif
-        if (!strcmp("start_iodevice", key)) {
+        if (!is_lustre && !strcmp("start_iodevice", key)) {
             if (default_striping_factor > 1 && atoi(value) != default_striping_factor - 2) {
                 errs++;
                 if (verbose)
@@ -324,7 +330,7 @@ int main(int argc, char **argv)
                 if (verbose)
                     fprintf(stderr, "start_iodevice is %d; should be 0\n", atoi(value));
             }
-        } else if (!strcmp("striping_factor", key)) {
+        } else if (!is_lustre && !strcmp("striping_factor", key)) {
             if (atoi(value) != default_striping_factor) {
                 errs++;
                 if (verbose)
