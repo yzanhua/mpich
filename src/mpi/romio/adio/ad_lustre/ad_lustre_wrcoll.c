@@ -450,6 +450,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
     nbufs = fd->hints->cb_buffer_size / stripe_size / 2;
     if (fd->hints->cb_buffer_size % stripe_size) nbufs++;
     nbufs = (nbufs > ntimes) ? ntimes : nbufs;
+    if (nbufs == 0) nbufs = 1; /* must at least 1 */
+
 if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d stripe_size=%d\n",myrank,__func__,ntimes,nbufs,fd->hints->cb_buffer_size, stripe_size);
 
     /* end_loc >= 0 indicates this process has something to write. Only I/O
@@ -560,6 +562,8 @@ if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d strip
     batch_idx = batch_nreqs = 0;
     nreqs = (int*) ADIOI_Malloc(nbufs * sizeof(int));
 
+    int interleaving_waitall_n_write = 1;
+    int ibuf = 0;
     for (m = 0; m < ntimes; m++) {
         int real_size;
         ADIO_Offset real_off;
@@ -590,7 +594,7 @@ if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d strip
 
         /* reset communication metadata to all 0s for this round */
         for (i = 0; i < nprocs; i++)
-            recv_count[m%nbufs][i] = send_size[i] = recv_size[m%nbufs][i] = recv_start_pos[m%nbufs][i] = 0;
+            recv_count[ibuf][i] = send_size[i] = recv_size[ibuf][i] = recv_start_pos[ibuf][i] = 0;
 
         real_off = off_list[m];
         real_size = (int) MPL_MIN(stripe_size - real_off % stripe_size, end_loc - real_off + 1);
@@ -611,13 +615,13 @@ if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d strip
                 send_curr_offlen_ptr[i] = j;
             }
             if (others_req[i].count) {
-                recv_start_pos[m%nbufs][i] = recv_curr_offlen_ptr[i];
+                recv_start_pos[ibuf][i] = recv_curr_offlen_ptr[i];
                 for (j = recv_curr_offlen_ptr[i]; j < others_req[i].count; j++) {
                     if (others_req[i].offsets[j] < iter_end_off) {
-                        recv_count[m%nbufs][i]++;
+                        recv_count[ibuf][i]++;
                         others_req[i].mem_ptrs[j] =
                             (MPI_Aint) (others_req[i].offsets[j] - real_off);
-                        recv_size[m%nbufs][i] += others_req[i].lens[j];
+                        recv_size[ibuf][i] += others_req[i].lens[j];
                     } else {
                         break;
                     }
@@ -631,49 +635,67 @@ if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d strip
          * aggregators. In ADIOI_LUSTRE_W_Exchange_data(), communication are
          * Issend and Irecv, but no collective communication.
          */
-        char *wbuf = (write_buf == NULL) ? NULL : write_buf[m % nbufs];
-        char *rbuf = (recv_buf  == NULL) ? NULL :  recv_buf[m % nbufs];
-        send_buf[m%nbufs] = NULL;
+        char *wbuf = (write_buf == NULL) ? NULL : write_buf[ibuf];
+        char *rbuf = (recv_buf  == NULL) ? NULL :  recv_buf[ibuf];
+        send_buf[ibuf] = NULL;
         ADIOI_LUSTRE_W_Exchange_data(fd,
                                      buf,
                                      wbuf,               /* OUT: updated in each round */
                                      &rbuf,              /* OUT: updated in each round */
-                                     &send_buf[m%nbufs], /* OUT: updated in each round */
+                                     &send_buf[ibuf],    /* OUT: updated in each round */
                                      flat_buf,
                                      offset_list,
                                      len_list,
-                                     send_size,               /* IN: changed each round */
-                                     recv_size[m%nbufs],      /* IN: changed each round */
-                                     real_off,                /* IN: changed each round */
-                                     real_size,               /* IN: changed each round */
-                                     recv_count[m%nbufs],     /* IN: changed each round */
-                                     recv_start_pos[m%nbufs], /* IN: changed each round */
-                                     sent_to_proc,            /* OUT: sent_to_proc[i] amount of data sent to each rank i so far */
+                                     send_size,            /* IN: changed each round */
+                                     recv_size[ibuf],      /* IN: changed each round */
+                                     real_off,             /* IN: changed each round */
+                                     real_size,            /* IN: changed each round */
+                                     recv_count[ibuf],     /* IN: changed each round */
+                                     recv_start_pos[ibuf], /* IN: changed each round */
+                                     sent_to_proc,         /* OUT: sent_to_proc[i] amount of data sent to each rank i so far */
                                      buftype_is_contig,
                                      contig_access_count,
                                      striping_info,
-                                     others_req,              /* IN: changed each round */
+                                     others_req,           /* IN: changed each round */
                                      m,
                                      buftype_extent,
-                                     this_buf_idx,            /* IN: changed each round */
-                                     &srt_off_len[m % nbufs], /* OUT: list of write request off-len pairs */
-                                     reqs + batch_nreqs,      /* OUT: nonblocking recv+send request IDs */
-                                     &nreqs[m%nbufs],         /* OUT: number of recv+send request IDs */
+                                     this_buf_idx,         /* IN: changed each round */
+                                     &srt_off_len[ibuf],   /* OUT: list of write request off-len pairs */
+                                     reqs + batch_nreqs,   /* OUT: nonblocking recv+send request IDs */
+                                     &nreqs[ibuf],         /* OUT: number of recv+send request IDs */
                                      error_code);
-
-        /* rbuf might be realloc-ed */
-        if (recv_buf != NULL) recv_buf[m % nbufs] = rbuf;
-
-        /* accumulate nreqs across nbufs rounds */
-        batch_nreqs += nreqs[m%nbufs];
 
         if (*error_code != MPI_SUCCESS)
             goto over;
 
-        if (m % nbufs == nbufs - 1 || m == ntimes - 1) {
+        /* rbuf might be realloc-ed */
+        if (recv_buf != NULL) recv_buf[ibuf] = rbuf;
+
+        /* accumulate nreqs across nbufs rounds */
+        batch_nreqs += nreqs[ibuf];
+
+        /* Check if accumulated pending requests can cause high traffic
+         * congestion. If yes, then write to file now.
+         */
+        int write_now;
+        if (fd->is_agg)
+            write_now = (batch_nreqs >= nprocs);
+        else
+            /* For I/O patterns that each non-aggregator has a request falling
+             * into all aggregtor's file domain, set the trigger condition
+             * (avail_cb_nodes * 2) appears to be the best. FYI, setting the
+             * condition to (batch_nreqs >= nprocs) and it is no better, as
+             * non-aggregators may post too many issend.
+             */
+            write_now = (batch_nreqs >= avail_cb_nodes * 2);
+
+        /* commit writes for this bacth of numBufs */
+        if (m % nbufs == nbufs - 1 || m == ntimes - 1 || write_now) {
             MPI_Request *req_ptr;
-            int numBufs = (m == ntimes - 1) ? m % nbufs + 1 : nbufs;
-            int interleaving_waitall_n_write = 1;
+            int numBufs = ibuf + 1;
+
+            /* reset ibuf to the first element of nbufs */
+            ibuf = 0;
 
             /* Note that atomic mode calls only blocking recv and all
              * nonblocking sends are waited at the end of each round. So,
@@ -681,10 +703,9 @@ if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d strip
              */
             if (fd->atomicity) assert(batch_nreqs == 0);
 
-/* TODO: 1. check nreqs for high congestion
- *       2. check if it be faster when interleaving Waitall() and write() per
- *       stripe?
- */
+            /* interleaving_waitall_n_write or not does not seem to make a
+             * noticeable difference.
+             */
             if (interleaving_waitall_n_write) {
                 /* non-aggregators wait for all isend to complete */
                 if (!fd->is_agg && batch_nreqs > 0) {
@@ -832,8 +853,10 @@ if (myrank == 0) printf("%2d: ---- %s ntimes=%d nbufs=%d cb_buffer_size=%d strip
                     srt_off_len[j].num = 0;
                 }
             }
-            batch_idx += nbufs; /* only matters for aggregators */
+            batch_idx += numBufs; /* only matters for aggregators */
         }
+        else
+            ibuf++;
     }
 
   over:
