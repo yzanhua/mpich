@@ -12,23 +12,16 @@
 
 void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
 {
-    char *value;
     int flag;
     static char myname[] = "ADIOI_LUSTRE_SETINFO";
 
+    if (fd->hints->initialized && users_info == MPI_INFO_NULL) {
+        *error_code = MPI_SUCCESS;
+        return;
+    }
 
-#ifdef HAVE_LUSTRE_LOCKAHEAD
-    /* Set lock ahead default hints */
-    fd->hints->fs_hints.lustre.lock_ahead_read = 0;
-    fd->hints->fs_hints.lustre.lock_ahead_write = 0;
-    fd->hints->fs_hints.lustre.lock_ahead_num_extents = 500;
-    fd->hints->fs_hints.lustre.lock_ahead_flags = 0;
-#endif
-
-    value = (char *) ADIOI_Malloc((MPI_MAX_INFO_VAL + 1) * sizeof(char));
-    if ((fd->info) == MPI_INFO_NULL) {
-        /* This must be part of the open call. can set striping parameters
-         * if necessary. */
+    if (!fd->hints->initialized) {
+        /* Hints here are the ones that can only be set at MPI_File_open */
         MPI_Info_create(&(fd->info));
 
         ADIOI_Info_set(fd->info, "direct_read", "false");
@@ -40,9 +33,20 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
         ADIOI_Info_set(fd->info, "romio_lustre_coll_threshold", "0");
         fd->hints->fs_hints.lustre.coll_threshold = 0;
 
+#ifdef HAVE_LUSTRE_LOCKAHEAD
+        /* Set lock ahead default hints */
+        fd->hints->fs_hints.lustre.lock_ahead_read = 0;
+        fd->hints->fs_hints.lustre.lock_ahead_write = 0;
+        fd->hints->fs_hints.lustre.lock_ahead_num_extents = 500;
+        fd->hints->fs_hints.lustre.lock_ahead_flags = 0;
+#endif
+
         /* has user specified striping or server buffering parameters
          * and do they have the same value on all processes? */
         if (users_info != MPI_INFO_NULL) {
+            char *value;
+            value = (char *) ADIOI_Malloc((MPI_MAX_INFO_VAL + 1) * sizeof(char));
+
             /* striping information */
             ADIOI_Info_get(users_info, "striping_unit", MPI_MAX_INFO_VAL, value, &flag);
             if (flag)
@@ -106,10 +110,11 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
                                                  myname, error_code);
             }
 #endif
+            ADIOI_Free(value);
         }
     }
 
-    /* get other hint */
+    /* hints below are allowed in both MPI_File_open and MPI_File_setview */
     if (users_info != MPI_INFO_NULL) {
         /* CO: IO Clients/OST,
          * to keep the load balancing between clients and OSTs */
@@ -131,8 +136,6 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
         fd->direct_read = 1;
     if (ADIOI_Direct_write)
         fd->direct_write = 1;
-
-    ADIOI_Free(value);
 
     *error_code = MPI_SUCCESS;
 }
