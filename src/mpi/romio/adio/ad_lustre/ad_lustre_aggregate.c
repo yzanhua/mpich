@@ -87,45 +87,48 @@ void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd, int *striping_info, int mode)
     striping_info[2] = avail_cb_nodes;
 }
 
-int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * len, int stripe_size)
+int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * len)
 {
     ADIO_Offset avail_bytes, stripe_id;
 
-    stripe_id = off / stripe_size;
+    stripe_id = off / fd->hints->striping_unit;
 
-    avail_bytes = (stripe_id + 1) * stripe_size - off;
+    avail_bytes = (stripe_id + 1) * fd->hints->striping_unit - off;
     if (avail_bytes < *len) {
         /* The request [off, off+len) has only [off, off+avail_bytes) part
          * falling into aggregator's file domain */
         *len = avail_bytes;
     }
-    /* map index to cb_node's MPI rank */
-    return fd->hints->ranklist[stripe_id % fd->hints->cb_nodes];
+    /* return the index to ranklist[] */
+    return (stripe_id % fd->hints->cb_nodes);
 }
 
 /* ADIOI_LUSTRE_Calc_my_req() - calculate what portions of the access requests
  * of this process are located in the file domains of I/O aggregators.
  */
-void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
-                              ADIO_Offset * len_list, int contig_access_count,
-                              int *striping_info, int nprocs,
+void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd,
+                              ADIO_Offset *offset_list,
+                              ADIO_Offset *len_list,
+                              int contig_access_count,
                               int *count_my_req_procs_ptr,
                               int **count_my_req_per_proc_ptr,
-                              ADIOI_Access ** my_req_ptr, ADIO_Offset *** buf_idx_ptr)
+                              ADIOI_Access **my_req_ptr,
+                              ADIO_Offset ***buf_idx_ptr)
 {
     int *count_my_req_per_proc, count_my_req_procs;
-    int i, l, proc, *aggr_ranks, stripe_size;
+    int i, l, proc, *aggr_ranks, cb_nodes;
     size_t nelems;
     ADIO_Offset avail_len, rem_len, curr_idx, off, **buf_idx, *ptr;
     ADIO_Offset *avail_lens;
     ADIOI_Access *my_req;
 
-    stripe_size = striping_info[0];
+    int striping_unit = fd->hints->striping_unit;
+    cb_nodes = fd->hints->cb_nodes;
 
-    *count_my_req_per_proc_ptr = (int *) ADIOI_Calloc(nprocs, sizeof(int));
+    *count_my_req_per_proc_ptr = (int *) ADIOI_Calloc(cb_nodes, sizeof(int));
     count_my_req_per_proc = *count_my_req_per_proc_ptr;
     /* count_my_req_per_proc[i] gives the number of contiguous requests of this
-     * process that fall in process i's file domain.
+     * process that fall in aggregator i's file domain.
      */
 
     /* First pass just to calculate how much space to allocate for my_req.
@@ -155,7 +158,7 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
          * values proc and avail_len in aggr_ranks[] and avail_lens[] to be
          * used in the next for loop.
          */
-        proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, stripe_size);
+        proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
         aggr_ranks[i] = proc;
         avail_lens[i] = avail_len;
         count_my_req_per_proc[proc]++;
@@ -169,7 +172,7 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
         while (rem_len != 0) {
             off += avail_len;   /* point to first remaining byte */
             avail_len = rem_len;        /* save remaining size, pass to calc */
-            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, stripe_size);
+            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
             count_my_req_per_proc[proc]++;
             nelems++;
             rem_len -= avail_len;       /* reduce remaining length by amount from fd */
@@ -180,22 +183,25 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
      * starting index in user_buf where data will be sent to proc 'i'. This
      * allows sends to be done without extra buffer.
      */
-    ptr = (ADIO_Offset *) ADIOI_Malloc((nelems * 3 + nprocs) * sizeof(ADIO_Offset));
+    ptr = (ADIO_Offset *) ADIOI_Malloc((nelems * 3 + cb_nodes) * sizeof(ADIO_Offset));
 
     /* allocate space for buf_idx */
-    buf_idx = (ADIO_Offset **) ADIOI_Malloc(nprocs * sizeof(ADIO_Offset *));
+    buf_idx = (ADIO_Offset **) ADIOI_Malloc(cb_nodes * sizeof(ADIO_Offset *));
     buf_idx[0] = ptr;
-    for (i = 1; i < nprocs; i++)
+    for (i = 1; i < cb_nodes; i++)
         buf_idx[i] = buf_idx[i - 1] + count_my_req_per_proc[i - 1] + 1;
-    ptr += nelems + nprocs;     /* "+ nprocs" puts a terminal index at the end */
+    ptr += nelems + cb_nodes;     /* "+ cb_nodes" puts a terminal index at the end */
 
     /* allocate space for my_req and its members offsets and lens */
-    *my_req_ptr = (ADIOI_Access *) ADIOI_Malloc(nprocs * sizeof(ADIOI_Access));
+    *my_req_ptr = (ADIOI_Access *) ADIOI_Malloc(cb_nodes * sizeof(ADIOI_Access));
     my_req = *my_req_ptr;
     my_req[0].offsets = ptr;
 
+    /* count_my_req_procs is the number of aggregators whose file domains have
+     * this rank's write requests
+     */
     count_my_req_procs = 0;
-    for (i = 0; i < nprocs; i++) {
+    for (i = 0; i < cb_nodes; i++) {
         if (count_my_req_per_proc[i]) {
             my_req[i].offsets = ptr;
             ptr += count_my_req_per_proc[i];
@@ -234,8 +240,7 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
         while (rem_len != 0) {
             off += avail_len;
             avail_len = rem_len;
-            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, stripe_size);
-
+            proc = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
             l = my_req[proc].count;
             ADIOI_Assert(l < count_my_req_per_proc[proc]);
             buf_idx[proc][l] = curr_idx;
@@ -251,7 +256,7 @@ void ADIOI_LUSTRE_Calc_my_req(ADIO_File fd, ADIO_Offset * offset_list,
     ADIOI_Free(avail_lens);
 
 #ifdef AGG_DEBUG
-    for (i = 0; i < nprocs; i++) {
+    for (i = 0; i < cb_nodes; i++) {
         if (count_my_req_per_proc[i] > 0) {
             FPRINTF(stdout, "data needed from %d (count = %d):\n", i, my_req[i].count);
             for (l = 0; l < my_req[i].count; l++) {
