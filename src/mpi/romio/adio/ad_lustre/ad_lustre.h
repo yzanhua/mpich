@@ -78,8 +78,6 @@ int ADIOI_LUSTRE_Docollect(ADIO_File fd, int contig_access_count,
                            ADIO_Offset * len_list, int nprocs);
 
 void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd, int *striping_info, int mode);
-void ADIOI_LUSTRE_Free_my_req(int nprocs, int *count_my_req_per_proc,
-                              ADIOI_Access * my_req, ADIO_Offset ** buf_idx);
 
 int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * len);
 #endif /* AD_LUSTRE_H_INCLUDED */

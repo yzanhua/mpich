@@ -615,7 +615,11 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
 
         /* free all memory allocated */
         ADIOI_Free_others_req(nprocs, count_others_req_per_proc, others_req);
-        ADIOI_LUSTRE_Free_my_req(nprocs, count_my_req_per_aggr, my_req, buf_idx);
+
+        ADIOI_Free(count_my_req_per_aggr);
+        ADIOI_Free(buf_idx[0]);
+        ADIOI_Free(buf_idx);
+        ADIOI_Free(my_req);
     }
     ADIOI_Free(offset_list);
 
