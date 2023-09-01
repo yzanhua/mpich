@@ -85,7 +85,7 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, const void *buf,
                                           int contig_access_count,
                                           int my_aggr_idx,
                                           int iter,
-                                          MPI_Aint buftype_extent);
+                                          ADIO_Offset buftype_extent);
 static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          char *write_buf,
                                          char **recve_buf,
@@ -107,7 +107,8 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          int contig_access_count,
                                          int my_aggr_idx,
                                          const ADIOI_Access *others_req,
-                                         int iter, MPI_Aint buftype_extent,
+                                         int iter,
+                                         ADIO_Offset buftype_extent,
                                          const ADIO_Offset * buf_idx,
                                          off_len_list *srt_off_len,
                                          MPI_Request *reqs,
@@ -717,9 +718,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     int *send_curr_offlen_ptr, *send_size;
     int batch_idx, *nreqs, batch_nreqs, cb_nodes, striping_unit;
     ADIO_Offset end_loc, req_off, iter_end_off, *off_list, step_size;
-    ADIO_Offset *this_buf_idx;
+    ADIO_Offset *this_buf_idx, buftype_extent;
     ADIOI_Flatlist_node *flat_buf = NULL;
-    MPI_Aint lb, buftype_extent;
     off_len_list *srt_off_len = NULL;
 
     *error_code = MPI_SUCCESS;
@@ -821,18 +821,27 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     send_size = send_curr_offlen_ptr + cb_nodes;
 
     ADIOI_Datatype_iscontig(datatype, &buftype_is_contig);
-    if (!buftype_is_contig)
+    if (!buftype_is_contig) {
         flat_buf = ADIOI_Flatten_and_find(datatype);
-    MPI_Type_get_extent(datatype, &lb, &buftype_extent);
+#if MPI_VERSION >= 4
+        MPI_Count lb, extent;
+        MPI_Type_get_extent_c(datatype, &lb, &extent);
+#else
+        MPI_Aint lb, extent;
+        MPI_Type_get_extent(datatype, &lb, &extent);
+#endif
+        buftype_extent = (ADIO_Offset)extent;
 
+        if (flat_buf->count == 1) /* actually contiguous */
+            buftype_is_contig = 1;
+
+if (flat_buf->count == 1) printf("%d: -- CHANGE noncontig to contig ntimes=%d flat_buf->count=%ld\n",myrank,ntimes,flat_buf->count);
 /*
-int buftype_size;
-MPI_Type_size(datatype, &buftype_size);
-if (!buftype_is_contig)
-printf("%d: %s -- ntimes=%d buftype_is_contig=%d flat_buf->count=%ld extent=%ld size=%d\n",myrank,__func__,ntimes,buftype_is_contig,flat_buf->count,buftype_extent,buftype_size);
-else
-printf("%d: %s -- ntimes=%d buftype_is_contig=%d extent=%ld size=%d\n",myrank,__func__,ntimes,buftype_is_contig,buftype_extent,buftype_size);
+for (i=0; i<flat_buf->count; i++)
+    printf("    flat_buf[%d] off=%9lld len=%9lld end=%9lld\n",i, flat_buf->indices[i], flat_buf->blocklens[i], flat_buf->indices[i]+flat_buf->blocklens[i]);
  */
+    }
+if (!buftype_is_contig) printf("%d: -- ntimes=%d buftype NOT contig\n",myrank,ntimes);
 
     /* I need to check if there are any outstanding nonblocking writes to
      * the file, which could potentially interfere with the writes taking
@@ -1365,7 +1374,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(
             int                  my_aggr_idx,
       const ADIOI_Access        *others_req,   /* others_req[i] is rank i's write requests fall into this rank's file domain */
             int                  iter,         /* round ID */
-            MPI_Aint             buftype_extent,
+            ADIO_Offset          buftype_extent,
       const ADIO_Offset         *buf_idx,      /* indices to user buffer for sending this rank's write data to aggregator i */
             off_len_list        *srt_off_len,  /* OUT: list of writes by this rank in this round */
             MPI_Request         *reqs,         /* OUT: MPI nonblocking recv+send request IDs */
@@ -1632,7 +1641,7 @@ num_memcpy++; \
                 (*n_buftypes)++; \
             } \
             user_buf_idx = flat_buf->indices[*flat_buf_idx] + \
-                (ADIO_Offset)(*n_buftypes)*(ADIO_Offset)buftype_extent; \
+                (ADIO_Offset)(*n_buftypes)*buftype_extent; \
             *flat_buf_sz = flat_buf->blocklens[*flat_buf_idx]; \
             user_buf_ptr = (char*) buf + user_buf_idx; \
         } \
@@ -1663,7 +1672,7 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
                                           int contig_access_count,
                                           int my_aggr_idx,
                                           int iter,
-                                          MPI_Aint buftype_extent)
+                                          ADIO_Offset buftype_extent)
 {
     /* this function is only called if buftype is not contig */
     int ii, jj, q, size, send_size_rem=0;
@@ -1677,11 +1686,14 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
      * location to be copied..
      *
      * flat_buf stores the offset-length pairs of the flattened user buffer
-     * data type. Note this stores offset-length pairs of the data type, and
-     * write amount can be a multiple of the data type.
+     *     data type. Note this stores offset-length pairs of the data type,
+     *     and write amount can be a multiple of the data type.
      * n_buftypes stores the current number of data types being processed.
      * flat_buf->count: the number of pairs
-     * flat_buf->indices[i]: the ith pair's byte offset to buf
+     * flat_buf->indices[i]: the ith pair's byte offset to buf. Note the
+     *     flattened offsets of user buffer type may not be sorted in an
+     *     increasing order, unlike fileview which is required by MPI to be
+     *     sorted in a monotonically non-decreasing order.
      * flat_buf->blocklens[i]: length of the ith pair
      * flat_buf_idx: index to the offset-length pair currently being processed,
      *     incremented each round.
@@ -1779,7 +1791,7 @@ done:
     if (len_list[ii] == 0) ii++;
     *fileview_indx = ii;
 
-printf("---- iter=%d contig_access_count=%d ii=%d rem_len=%lld fileview_indx=%d num_memcpy=%d\n",iter,contig_access_count,ii,rem_len,*fileview_indx,num_memcpy);
+printf("---- iter=%d contig_access_count=%d ii=%d n_buftypes=%lld fileview_indx=%d num_memcpy=%d\n",iter,contig_access_count,ii,*n_buftypes,*fileview_indx,num_memcpy);
 }
 
 /* This function calls ADIOI_OneSidedWriteAggregation iteratively to
