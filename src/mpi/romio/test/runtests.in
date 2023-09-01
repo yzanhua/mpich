@@ -426,6 +426,16 @@ MakeExe fstype_prefix
 echo '**** Testing fstype_prefix ****'
 $mpirun -np 2 ${valgrind_opt} ./fstype_prefix
 #
+OutTime
+MakeExe ghost_cell
+echo '**** Testing ghost_cell ****'
+$mpirun -np 4 ${valgrind_opt} ./ghost_cell -q
+#
+OutTime
+MakeExe check_type_contig
+echo '**** Testing check_type_contig ****'
+$mpirun -np 1 ${valgrind_opt} ./check_type_contig -q
+#
 
 #
 if [ @NOF77@ = 0 ] ; then
