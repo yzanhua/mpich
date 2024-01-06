@@ -160,14 +160,14 @@ ADIO_File ADIO_Open(MPI_Comm orig_comm,
             if (*error_code != MPI_SUCCESS)
                 goto fn_exit;
         }
+        fd->my_cb_nodes_index = -2;
         fd->is_agg = is_aggregator(rank, fd);
     }
-    fd->is_open = 0;
-    fd->my_cb_nodes_index = -2;
+    /* for Lustre fd->is_agg and fd->my_cb_nodes_index are set in
+     * construct_aggr_list() in ADIOI_OpenColl() in ad_opencoll.c
+     */
 
-    if (fd->file_system != ADIO_LUSTRE)
-        /* for Lustre fd->is_agg is set in construct_aggr_list() */
-        fd->is_agg = is_aggregator(rank, fd);
+    fd->is_open = 0;
 
     /* deferred open used to split the communicator to create an "aggregator
      * communicator", but we only used it as a way to indicate that deferred
