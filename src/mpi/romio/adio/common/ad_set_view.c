@@ -83,10 +83,12 @@ void ADIO_Set_view(ADIO_File fd, ADIO_Offset disp, MPI_Datatype etype,
         MPI_Type_commit(&copy_etype);
         fd->etype = copy_etype;
         ADIOI_Datatype_iscontig(fd->etype, &etype_is_contig);
+
+        /* Only check etype if etype is not a predefined MPI datatype */
+        flat_etype = ADIOI_Flatten_and_find(fd->etype);
+        if (0 == check_type(flat_etype, fd->orig_access_mode, myname, "etype", error_code))
+            return;
     }
-    flat_etype = ADIOI_Flatten_and_find(fd->etype);
-    if (0 == check_type(flat_etype, fd->orig_access_mode, myname, "etype", error_code))
-        return;
 
     ADIOI_Type_ispredef(filetype, &is_predef);
     if (is_predef) {
