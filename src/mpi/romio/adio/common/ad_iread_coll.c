@@ -1155,6 +1155,14 @@ static int ADIOI_GEN_irc_free_fn(void *extra_state)
     return MPI_SUCCESS;
 }
 
+#ifdef MPI_STATUSES_IGNORE
+#define ALLOC_STATUSES(n)
+#define FREE_STATUSES
+#else
+#define ALLOC_STATUSES(n) statuses = (MPI_Status *) ADIOI_Malloc((n + 1) * sizeof(MPI_Status));
+#define FREE_STATUSES ADIOI_Free(statuses);
+#endif
+
 static int ADIOI_GEN_irc_poll_fn(void *extra_state, MPI_Status * status)
 {
     ADIOI_NBC_Request *nbc_req;
@@ -1164,16 +1172,23 @@ static int ADIOI_GEN_irc_poll_fn(void *extra_state, MPI_Status * status)
     ADIOI_R_Iexchange_data_vars *red_vars = NULL;
     int errcode = MPI_SUCCESS;
     int flag;
+#ifdef MPI_STATUSES_IGNORE
+    MPI_Status *statuses = MPI_STATUSES_IGNORE;
+#else
+    MPI_Status *statuses;
+#endif
 
     nbc_req = (ADIOI_NBC_Request *) extra_state;
 
     switch (nbc_req->data.rd.state) {
         case ADIOI_IRC_STATE_GEN_IREADSTRIDEDCOLL:
             rsc_vars = nbc_req->data.rd.rsc_vars;
-            errcode = MPI_Testall(2, rsc_vars->req_offset, &flag, MPI_STATUSES_IGNORE);
+            ALLOC_STATUSES(2)
+            errcode = MPI_Testall(2, rsc_vars->req_offset, &flag, statuses);
             if (errcode == MPI_SUCCESS && flag) {
                 ADIOI_GEN_IreadStridedColl_inter(nbc_req, &errcode);
             }
+            FREE_STATUSES
             break;
 
         case ADIOI_IRC_STATE_GEN_IREADSTRIDEDCOLL_INDIO:
@@ -1196,11 +1211,13 @@ static int ADIOI_GEN_irc_poll_fn(void *extra_state, MPI_Status * status)
         case ADIOI_IRC_STATE_ICALC_OTHERS_REQ_MAIN:
             cor_vars = nbc_req->cor_vars;
             if (cor_vars->num_req2) {
+                ALLOC_STATUSES(cor_vars->num_req2)
                 errcode = MPI_Testall(cor_vars->num_req2, cor_vars->req2,
-                                      &flag, MPI_STATUSES_IGNORE);
+                                      &flag, statuses);
                 if (errcode == MPI_SUCCESS && flag) {
                     ADIOI_Icalc_others_req_fini(nbc_req, &errcode);
                 }
+                FREE_STATUSES
             } else {
                 ADIOI_Icalc_others_req_fini(nbc_req, &errcode);
             }
@@ -1233,21 +1250,25 @@ static int ADIOI_GEN_irc_poll_fn(void *extra_state, MPI_Status * status)
 
         case ADIOI_IRC_STATE_R_IEXCHANGE_DATA_RECV:
             red_vars = nbc_req->data.rd.red_vars;
+            ALLOC_STATUSES(red_vars->nprocs_send)
             errcode = MPI_Testall(red_vars->nprocs_recv, red_vars->req2, &flag,
-                                  MPI_STATUSES_IGNORE);
+                                  statuses);
             if (errcode == MPI_SUCCESS && flag) {
                 ADIOI_R_Iexchange_data_fill(nbc_req, &errcode);
             }
+            FREE_STATUSES
             break;
 
         case ADIOI_IRC_STATE_R_IEXCHANGE_DATA_FILL:
             red_vars = nbc_req->data.rd.red_vars;
+            ALLOC_STATUSES(red_vars->nprocs_recv)
             errcode = MPI_Testall(red_vars->nprocs_send,
                                   red_vars->req2 + red_vars->nprocs_recv,
-                                  &flag, MPI_STATUSES_IGNORE);
+                                  &flag, statuses);
             if (errcode == MPI_SUCCESS && flag) {
                 ADIOI_R_Iexchange_data_fini(nbc_req, &errcode);
             }
+            FREE_STATUSES
             break;
 
         default:

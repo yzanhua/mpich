@@ -1260,6 +1260,14 @@ static void ADIOI_W_Iexchange_data_send(ADIOI_NBC_Request * nbc_req, int *error_
     ADIOI_W_Iexchange_data_wait(nbc_req, error_code);
 }
 
+#ifdef MPI_STATUSES_IGNORE
+#define ALLOC_STATUSES(n)
+#define FREE_STATUSES
+#else
+#define ALLOC_STATUSES(n) statuses = (MPI_Status *) ADIOI_Malloc((n + 1) * sizeof(MPI_Status));
+#define FREE_STATUSES ADIOI_Free(statuses);
+#endif
+
 static void ADIOI_W_Iexchange_data_wait(ADIOI_NBC_Request * nbc_req, int *error_code)
 {
     ADIOI_W_Iexchange_data_vars *vars = nbc_req->data.wr.wed_vars;
@@ -1268,6 +1276,11 @@ static void ADIOI_W_Iexchange_data_wait(ADIOI_NBC_Request * nbc_req, int *error_
     int nprocs_recv = vars->nprocs_recv;
     MPI_Datatype *recv_types = vars->recv_types;
     int i, nreqs;
+#ifdef MPI_STATUSES_IGNORE
+    MPI_Status *statuses = MPI_STATUSES_IGNORE;
+#else
+    MPI_Status *statuses;
+#endif
 
     for (i = 0; i < vars->num_rtypes; i++)
         MPI_Type_free(recv_types + i);
@@ -1279,12 +1292,16 @@ static void ADIOI_W_Iexchange_data_wait(ADIOI_NBC_Request * nbc_req, int *error_
     i = 0;
     if (fd->atomicity) {
         nreqs = (vars->send_size[vars->myrank]) ? (nprocs_send - 1) : nprocs_send;
-        MPI_Testall(nreqs, vars->send_req, &i, MPI_STATUSES_IGNORE);
+        ALLOC_STATUSES(nreqs)
+        MPI_Testall(nreqs, vars->send_req, &i, statuses);
+        FREE_STATUSES
     } else {
         nreqs = nprocs_send + nprocs_recv;
         if (vars->send_size[vars->myrank])      /* No send to and recv from self */
             nreqs -= 2;
-        MPI_Testall(nreqs, vars->requests, &i, MPI_STATUSES_IGNORE);
+        ALLOC_STATUSES(nreqs)
+        MPI_Testall(nreqs, vars->requests, &i, statuses);
+        FREE_STATUSES
     }
 
     if (i) {
@@ -1360,16 +1377,23 @@ static int ADIOI_GEN_iwc_poll_fn(void *extra_state, MPI_Status * status)
     ADIOI_W_Iexchange_data_vars *wed_vars = NULL;
     int errcode = MPI_SUCCESS;
     int flag;
+#ifdef MPI_STATUSES_IGNORE
+    MPI_Status *statuses = MPI_STATUSES_IGNORE;
+#else
+    MPI_Status *statuses;
+#endif
 
     nbc_req = (ADIOI_NBC_Request *) extra_state;
 
     switch (nbc_req->data.wr.state) {
         case ADIOI_IWC_STATE_GEN_IWRITESTRIDEDCOLL:
             wsc_vars = nbc_req->data.wr.wsc_vars;
-            errcode = MPI_Testall(2, wsc_vars->req_offset, &flag, MPI_STATUSES_IGNORE);
+            ALLOC_STATUSES(2)
+            errcode = MPI_Testall(2, wsc_vars->req_offset, &flag, statuses);
             if (errcode == MPI_SUCCESS && flag) {
                 ADIOI_GEN_IwriteStridedColl_inter(nbc_req, &errcode);
             }
+            FREE_STATUSES
             break;
 
         case ADIOI_IWC_STATE_GEN_IWRITESTRIDEDCOLL_INDIO:
@@ -1401,11 +1425,13 @@ static int ADIOI_GEN_iwc_poll_fn(void *extra_state, MPI_Status * status)
         case ADIOI_IWC_STATE_ICALC_OTHERS_REQ_MAIN:
             cor_vars = nbc_req->cor_vars;
             if (cor_vars->num_req2) {
+                ALLOC_STATUSES(cor_vars->num_req2)
                 errcode = MPI_Testall(cor_vars->num_req2, cor_vars->req2,
-                                      &flag, MPI_STATUSES_IGNORE);
+                                      &flag, statuses);
                 if (errcode == MPI_SUCCESS && flag) {
                     ADIOI_Icalc_others_req_fini(nbc_req, &errcode);
                 }
+                FREE_STATUSES
             } else {
                 ADIOI_Icalc_others_req_fini(nbc_req, &errcode);
             }
@@ -1438,7 +1464,7 @@ static int ADIOI_GEN_iwc_poll_fn(void *extra_state, MPI_Status * status)
 
         case ADIOI_IWC_STATE_W_IEXCHANGE_DATA_HOLE:
             wed_vars = nbc_req->data.wr.wed_vars;
-            errcode = MPI_Test(&wed_vars->req2, &flag, MPI_STATUSES_IGNORE);
+            errcode = MPI_Test(&wed_vars->req2, &flag, statuses);
             if (errcode == MPI_SUCCESS && flag) {
                 /* --BEGIN ERROR HANDLING-- */
                 if (wed_vars->err != MPI_SUCCESS) {
@@ -1455,11 +1481,13 @@ static int ADIOI_GEN_iwc_poll_fn(void *extra_state, MPI_Status * status)
 
         case ADIOI_IWC_STATE_W_IEXCHANGE_DATA_SEND:
             wed_vars = nbc_req->data.wr.wed_vars;
+            ALLOC_STATUSES(wed_vars->nprocs_recv)
             errcode = MPI_Testall(wed_vars->nprocs_recv, wed_vars->req3,
-                                  &flag, MPI_STATUSES_IGNORE);
+                                  &flag, statuses);
             if (errcode == MPI_SUCCESS && flag) {
                 ADIOI_W_Iexchange_data_wait(nbc_req, &errcode);
             }
+            FREE_STATUSES
             break;
 
         case ADIOI_IWC_STATE_W_IEXCHANGE_DATA_WAIT:
@@ -1468,12 +1496,16 @@ static int ADIOI_GEN_iwc_poll_fn(void *extra_state, MPI_Status * status)
                 int nreqs = wed_vars->nprocs_send;
                 if (wed_vars->send_size[wed_vars->myrank])
                     nreqs--;
-                errcode = MPI_Testall(nreqs, wed_vars->send_req, &flag, MPI_STATUSES_IGNORE);
+                ALLOC_STATUSES(nreqs)
+                errcode = MPI_Testall(nreqs, wed_vars->send_req, &flag, statuses);
+                FREE_STATUSES
             } else {
                 int nreqs = wed_vars->nprocs_send + wed_vars->nprocs_recv;
                 if (wed_vars->send_size[wed_vars->myrank])
                     nreqs -= 2;
-                errcode = MPI_Testall(nreqs, wed_vars->requests, &flag, MPI_STATUSES_IGNORE);
+                ALLOC_STATUSES(nreqs)
+                errcode = MPI_Testall(nreqs, wed_vars->requests, &flag, statuses);
+                FREE_STATUSES
             }
             if (errcode == MPI_SUCCESS && flag) {
                 ADIOI_W_Iexchange_data_fini(nbc_req, &errcode);
