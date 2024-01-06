@@ -445,11 +445,12 @@ static int construct_aggr_list(ADIO_File fd, int root, int *error_code)
         }
         else { /* striping_factor <= nprocs */
             /* Select striping_factor processes to be I/O aggregators */
-            // if (fd->hints->cb_nodes == 0) /* hint cb_nodes is not set by user */
+
+// if (fd->hints->cb_nodes == 0) /* hint cb_nodes is not set by user */
 if (fd->hints->cb_nodes == 0 || fd->access_mode & ADIO_RDONLY) {
-/* for now, do not mess up ranklist for read operations */
-printf("ADIO_RDONLY file %s\n",fd->filename);
                 num_aggr = fd->hints->striping_factor;
+/* for now, do not accept user hint to set ranklist for read operations */
+
 }
             else if (fd->hints->cb_nodes <= striping_factor)
                 /* User has set hint cb_nodes and cb_nodes <= striping_factor.
@@ -543,7 +544,6 @@ printf("ADIO_RDONLY file %s\n",fd->filename);
              * selected as I/O aggregators
              */
 
-printf("%d: num_nodes=%d nprocs_per_node[0]=%d num_aggr=%d naggr_per_node[0]=%d\n",rank,num_nodes,nprocs_per_node[0],num_aggr,naggr_per_node[0]);
             for (i = 0; i < num_aggr; i++) {
                 int stripe_i = i % striping_factor;
                 j = stripe_i % num_nodes; /* to select from node j */
@@ -556,8 +556,6 @@ printf("%d: num_nodes=%d nprocs_per_node[0]=%d num_aggr=%d naggr_per_node[0]=%d\
             ADIOI_Free(naggr_per_node);
             ADIOI_Free(idx_per_node);
         }
-printf("%d: num_nodes=%d nprocs_per_node[0]=%d num_aggr=%d ranklist=%d %d %d %d (%s)\n",rank,num_nodes,nprocs_per_node[0],num_aggr,fd->hints->ranklist[0],fd->hints->ranklist[1],fd->hints->ranklist[2],fd->hints->ranklist[3],fd->filename);
-fflush(stdout);
 
         /* TODO: we can keep these two arrays in case for dynamic construction
          * of fd->hints->ranklist[], such as in group-cyclic file domain
@@ -600,9 +598,11 @@ fflush(stdout);
 
     /* check whether this process is selected as an I/O aggregator */
     fd->is_agg = 0;
+    fd->my_cb_nodes_index = -1;
     for (i = 0; i < num_aggr; i++) {
         if (rank == fd->hints->ranklist[i]) {
             fd->is_agg = 1;
+            fd->my_cb_nodes_index = i;
             break;
         }
     }
