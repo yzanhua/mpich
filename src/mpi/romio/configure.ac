@@ -1021,6 +1021,10 @@ if test "$MIMIC_LUSTRE" = yes ; then
 fi
 lustre_lockahead="no"
 if test -n "$file_system_lustre"; then
+REAL_LUSTRE=no
+if test "$REAL_LUSTRE" = no ; then
+   AC_DEFINE(ROMIO_LUSTRE, 1, [Define for ROMIO with LUSTRE])
+else
     AC_CHECK_HEADERS([linux/lustre/lustre_user.h lustre/lustre_user.h],
         break)
     if test x"$ac_cv_header_linux_lustre_lustre_user_h" = "xyes" -o x"$ac_cv_header_lustre_lustre_user_h" = "xyes" ; then
@@ -1039,7 +1043,8 @@ if test -n "$file_system_lustre"; then
             return 0; }
         ])],
         [lustre_lockahead="yes"
-	 AC_DEFINE(HAVE_LUSTRE_LOCKAHEAD, 1, [Define if LUSTRE_LOCKAHEAD is enabled.])])
+        AC_DEFINE(HAVE_LUSTRE_LOCKAHEAD, 1, [Define if LUSTRE_LOCKAHEAD is enabled.])])
+fi
 fi
 
 # Add conditional compilation of Lustre lockahead sources
