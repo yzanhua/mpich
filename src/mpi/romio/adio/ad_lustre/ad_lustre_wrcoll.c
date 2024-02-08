@@ -4,7 +4,18 @@
  */
 
 #include "ad_lustre.h"
+#include "adio.h"
 #include "adio_extern.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+#define ZH_PRINT {printf("DEBUG %d: %s:%s:%d\t---------------\t", myrank, __FILE__, __func__, __LINE__);}
+
+#define myprintf(...) { \
+    ZH_PRINT; \
+    printf(__VA_ARGS__); \
+}
 
 
 #ifdef HAVE_LUSTRE_LOCKAHEAD
@@ -53,6 +64,8 @@ typedef struct {
     int         *len; /* list of write lengths by this rank in round m */
     ADIO_Offset *off; /* list of write offsets by this rank in round m */
 } off_len_list;
+
+void shuffle_array(int *array, int n);
 
 
 /* prototypes of functions used for collective writes only. */
@@ -507,6 +520,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
     ADIO_Offset orig_fp, start_offset, end_offset;
     ADIO_Offset min_st_loc = -1, max_end_loc = -1;
     ADIO_Offset *offset_list = NULL, *len_list = NULL;
+    double start_time, end_time;
+    start_time = MPI_Wtime();
 
     MPI_Comm_size(fd->comm, &nprocs);
     MPI_Comm_rank(fd->comm, &myrank);
@@ -722,6 +737,9 @@ else
         ADIOI_Free(my_req);
     }
     ADIOI_Free(offset_list);
+    end_time = MPI_Wtime();
+    fd->two_phase_total_time += (end_time - start_time);
+
 
     /* If this collective write is followed by an independent write, it's
      * possible to have those subsequent writes on other processes race ahead
@@ -771,6 +789,21 @@ else
     fd->fp_sys_posn = -1;       /* set it to null. */
 }
 
+void shuffle_array(int *array, int n) {
+    int temp;
+    srand(time(NULL));  // Seed for random number generation
+
+    for (int i = n - 1; i > 0; --i) {
+        // Generate a random index between 0 and i (inclusive)
+        int j = rand() % (i + 1);
+
+        // Swap array[i] and array[j]
+        temp = array[i];
+        array[i] = array[j];
+        array[j] = temp;
+    }
+}
+
 /* If successful, error_code is set to MPI_SUCCESS.  Otherwise an error code is
  * created and returned in error_code.
  */
@@ -805,7 +838,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
      */
 
     char **write_buf = NULL, **recv_buf = NULL, ***send_buf = NULL;
-    int i, j, m, nprocs, myrank, ntimes, nbufs, buftype_is_contig;
+    int i, j, mphase, nprocs, myrank, ntimes, nbufs, buftype_is_contig;
     int *recv_curr_offlen_ptr, **recv_size=NULL, **recv_count=NULL;
     int **recv_start_pos=NULL;
     int *send_curr_offlen_ptr, *send_size;
@@ -814,6 +847,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     ADIO_Offset *this_buf_idx, buftype_extent;
     ADIOI_Flatlist_node *flat_buf = NULL;
     off_len_list *srt_off_len = NULL;
+    double start_time;
+    int m, *phase_order;
 
     *error_code = MPI_SUCCESS;
 
@@ -852,13 +887,13 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
      */
     off_list = (ADIO_Offset *) ADIOI_Malloc(ntimes * sizeof(ADIO_Offset));
     end_loc = -1;
-    for (m = 0; m < ntimes; m++)
-        off_list[m] = max_end_loc;
+    for (mphase = 0; mphase < ntimes; mphase++)
+        off_list[mphase] = max_end_loc;
     for (i = 0; i < nprocs; i++) {
         for (j = 0; j < others_req[i].count; j++) {
             req_off = others_req[i].offsets[j];
-            m = (int) ((req_off - min_st_loc) / step_size);
-            off_list[m] = MPL_MIN(off_list[m], req_off);
+            mphase = (int) ((req_off - min_st_loc) / step_size);
+            off_list[mphase] = MPL_MIN(off_list[mphase], req_off);
             end_loc = MPL_MAX(end_loc, (others_req[i].offsets[j] + others_req[i].lens[j] - 1));
         }
     }
@@ -872,6 +907,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     if (fd->hints->cb_buffer_size % striping_unit) nbufs++;
     nbufs = (nbufs > ntimes) ? ntimes : nbufs;
     if (nbufs == 0) nbufs = 1; /* must at least 1 */
+
+    myprintf("nbufs = %d, cb_buffer_size=%d\n", nbufs, fd->hints->cb_buffer_size);
 
     /* end_loc >= 0 indicates this process has something to write. Only I/O
      * aggregators can have end_loc > 0. write_buf is the collective buffer and
@@ -1000,9 +1037,40 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     int flat_buf_idx = 0;
     int flat_buf_sz = (buftype_is_contig) ? 0 : flat_buf->blocklens[0];
 
+    myprintf("Total ntimes=%d\n", ntimes);
+    phase_order = (int*) ADIOI_Malloc(ntimes * sizeof(int));
+    if (myrank == 0) {
+        for (m = 0; m < ntimes; m++) {
+            phase_order[m] = m;
+        }
+        shuffle_array(phase_order, ntimes);
+    }
+    MPI_Bcast(phase_order, ntimes, MPI_INT, 0, fd->comm);
+
+    for (m = 0; m < ntimes; m++) {
+        myprintf("phase_order[%d]=%d\n", m, phase_order[m]);
+    }
+    for(i = 0; i< cb_nodes; i++){
+        myprintf("my_req[%d].count=%d\n", i, my_req[i].count);
+
+        for (j = 0; j < my_req[i].count; j++) {
+            myprintf("my_req[%d].offsets[%d]=%lld, my_req[%d].lens[%d]=%lld\n", i, j, my_req[i].offsets[j], i, j, my_req[i].lens[j]);
+        }
+    }
+
     for (m = 0; m < ntimes; m++) {
         int real_size;
         ADIO_Offset real_off;
+        ADIO_Offset iter_range_st;
+        ADIO_Offset iter_range_ed;
+        mphase = phase_order[m];
+        // mphase = m;
+        iter_range_st = min_st_loc + mphase * step_size;
+        iter_range_ed = iter_range_st + step_size;
+
+        myprintf("====================================================\n");
+        myprintf("current two_phase mphase[%d] = %d, iter_end_off=%lld\n", m, mphase, iter_end_off);
+        myprintf("iter_range_st=%lld, iter_range_ed=%lld\n", iter_range_st, iter_range_ed);
 
         /* Note that MPI standard requires that displacements in filetypes are
          * in a monotonically non-decreasing order and that, for writes, the
@@ -1035,14 +1103,16 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         for (i = 0; i < cb_nodes; i++)
             send_size[i] = 0;
 
-        real_off = off_list[m];
+        real_off = off_list[mphase];
         real_size = (int) MPL_MIN(striping_unit - real_off % striping_unit, end_loc - real_off + 1);
 
         /* First calculate what should be communicated, by going through all
          * others_req and my_req to check which will be sent and received in
          * this round.
          */
+
         for (i = 0; i < cb_nodes; i++) {
+<<<<<<< HEAD
             if (my_req[i].count) { /* No. this rank's off-len pairs to be sent to aggregetor i */
 
                 if (send_curr_offlen_ptr[i] == my_req[i].count)
@@ -1052,30 +1122,52 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                     this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]];
                 for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
                     if (my_req[i].offsets[j] < iter_end_off)
+=======
+            int start_this_buf_idx = -1;
+            if (my_req[i].count) {
+                for (j = 0; j < my_req[i].count; j++) {
+                    myprintf("before check: cnt=%d, my_req[%d].offsets[%d]=%lld\n", my_req[i].count, i, j, my_req[i].offsets[j]);
+                    if (my_req[i].offsets[j] < iter_range_ed && my_req[i].offsets[j] >= iter_range_st){
+                        if (start_this_buf_idx < 0) {
+                            start_this_buf_idx = j;
+                            if (buftype_is_contig)
+                                this_buf_idx[i] = buf_idx[i][j];
+                        }
+>>>>>>> f2f20b378 (try reorder)
                         send_size[i] += my_req[i].lens[j];
-                    else
-                        break;
+                        myprintf("my_req[i].offsets[j]=%lld\n", my_req[i].offsets[j]);
+                    }
                 }
-                send_curr_offlen_ptr[i] = j;
             }
         }
         for (i = 0; i < nprocs; i++) {
             if (others_req[i].count) {
-                recv_start_pos[ibuf][i] = recv_curr_offlen_ptr[i];
-                for (j = recv_curr_offlen_ptr[i]; j < others_req[i].count; j++) {
-                    if (others_req[i].offsets[j] < iter_end_off) {
+                int start_j = -1;
+                for (j = 0; j < others_req[i].count; j++) {
+                    if (others_req[i].offsets[j] < iter_range_ed && others_req[i].offsets[j] >= iter_range_st){
+                        if (start_j < 0) {
+                            start_j = j;
+                            recv_start_pos[ibuf][i] = j;
+                        }
                         recv_count[ibuf][i]++;
                         others_req[i].mem_ptrs[j] =
                             (MPI_Aint) (others_req[i].offsets[j] - real_off);
                         recv_size[ibuf][i] += others_req[i].lens[j];
-                    } else {
-                        break;
                     }
                 }
-                recv_curr_offlen_ptr[i] = j;
             }
         }
         iter_end_off += step_size;
+
+        myprintf("\t send_size: me (writer) ==> agg_i send size:\n");
+        for (i = 0; i < cb_nodes; i++){
+            myprintf("\t\t send_size[%d]=%d\n", i, send_size[i]);
+        }
+
+        myprintf("\t recv_count[j][i]: # off_len pairs, process[i] ==> me (agg)\n");
+        for (i = 0; i < nprocs; i++) {
+            myprintf("\t\t recv_count[%d][%d]=%d\n", ibuf, i, recv_count[ibuf][i]);
+        }
 
         /* redistribute (exchange) this process's write requests to I/O
          * aggregators. In ADIOI_LUSTRE_W_Exchange_data(), communication are
@@ -1106,7 +1198,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                      contig_access_count,
                                      my_aggr_idx,
                                      others_req,           /* IN: changed each round */
-                                     m,
+                                     mphase,
                                      buftype_extent,
                                      this_buf_idx,         /* IN: changed each round */
                                      &srt_off_len[ibuf],   /* OUT: list of write request off-len pairs */
@@ -1116,6 +1208,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
 
         if (*error_code != MPI_SUCCESS)
             goto over;
+
+        myprintf("Exchange_done\n");
 
         /* rbuf might be realloc-ed */
         if (recv_buf != NULL) recv_buf[ibuf] = rbuf;
@@ -1266,7 +1360,11 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                 if (srt_off_len[j].num == 0)
                     continue;
 
-                real_off = off_list[batch_idx + j];
+                mphase = phase_order[batch_idx + j];
+                real_off = off_list[mphase];
+
+                myprintf("batch_idx=%d, j=%d, m=%d, real_off=%lld\n", batch_idx, j, mphase, real_off);
+                // real_off = off_list[batch_idx + j];
                 real_size = (int) MPL_MIN(striping_unit - real_off % striping_unit,
                                           end_loc - real_off + 1);
 
@@ -1294,9 +1392,11 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                      * [real_off, real_off+real_size). This assertion should
                      * never fail.
                      */
+                    myprintf("srt_off_len[%d].off[%d]=%lld, real_off=%lld, real_size=%d, sum=%lld\n", j, i, srt_off_len[j].off[i], real_off, real_size, real_off + real_size);
                     ADIOI_Assert(srt_off_len[j].off[i] < real_off + real_size &&
                                  srt_off_len[j].off[i] >= real_off);
 
+                    start_time = MPI_Wtime();
                     ADIO_WriteContig(fd,
                                      write_buf[j] + (srt_off_len[j].off[i] - real_off),
                                      srt_off_len[j].len[i],
@@ -1304,6 +1404,7 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                                      ADIO_EXPLICIT_OFFSET,
                                      srt_off_len[j].off[i],
                                      &status, error_code);
+                    fd->io_phase_time += (MPI_Wtime() - start_time);
                     if (*error_code != MPI_SUCCESS)
                         goto over;
                 }
@@ -1313,6 +1414,7 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                     srt_off_len[j].num = 0;
                 }
             }
+            myprintf("batch_idx=%d, numBufs=%d\n", batch_idx, numBufs);
             batch_idx += numBufs; /* only matters for aggregators */
         }
         else
@@ -1320,6 +1422,7 @@ assert(req_ptr - reqs <= n_send_recv_ub);
     }
 
   over:
+    ADIOI_Free(phase_order);
     ADIOI_Free(reqs);
     ADIOI_Free(nreqs);
     if (srt_off_len)
