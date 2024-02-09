@@ -72,6 +72,8 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
     ADIO_Offset str_factor = -1, str_unit = 0, start_iodev = -1;
     size_t value_sz = (MPI_MAX_INFO_VAL + 1) * sizeof(char);
     static char myname[] = "ADIOI_LUSTRE_OPEN";
+    fd->two_phase_total_time = 0.0;
+    fd->io_phase_time = 0.0;
 
     MPI_Comm_rank(fd->comm, &myrank);
 
