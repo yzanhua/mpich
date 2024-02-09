@@ -65,8 +65,6 @@ typedef struct {
     ADIO_Offset *off; /* list of write offsets by this rank in round m */
 } off_len_list;
 
-void shuffle_array(int *array, int n);
-
 
 /* prototypes of functions used for collective writes only. */
 static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
@@ -789,9 +787,9 @@ else
     fd->fp_sys_posn = -1;       /* set it to null. */
 }
 
-void shuffle_array(int *array, int n) {
+static void shuffle_array(int *array, int n, int myrank) {
     int temp;
-    srand(time(NULL));  // Seed for random number generation
+    srand(time(NULL) + myrank);
 
     for (int i = n - 1; i > 0; --i) {
         // Generate a random index between 0 and i (inclusive)
@@ -803,6 +801,52 @@ void shuffle_array(int *array, int n) {
         array[j] = temp;
     }
 }
+
+static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_phases, int *recv_buff) {
+    int *send_buf   = NULL;
+    int *recvcounts = NULL;
+    int *displs     = NULL;
+    int start_pos   = 0;
+
+    // fd->hints->ranklist
+    // fd->is_agg whether I am an aggregator
+
+    // calloc: init to 0
+    recvcounts = (int *)ADIOI_Calloc (nprocs, sizeof (int));
+    displs     = (int *)ADIOI_Calloc (nprocs, sizeof (int));
+
+    for (int agg_id = 0; agg_id < fd->hints->cb_nodes; agg_id++) {
+        int agg_rank         = fd->hints->ranklist[agg_id];
+        recvcounts[agg_rank] = num_phases;
+        displs[agg_rank]     = start_pos;
+        start_pos += num_phases;
+    }
+
+    if (fd->is_agg) {
+        send_buf = (int *)ADIOI_Malloc (num_phases * sizeof (int));
+        for (int i = 0; i < num_phases; i++) { send_buf[i] = i; }
+        shuffle_array (send_buf, num_phases, myrank);
+        for (int i = 0; i < num_phases; i++) { myprintf("my phase_order[%d]=%d\n", i, send_buf[i]); }
+        MPI_Allgatherv (send_buf, num_phases, MPI_INT, recv_buff, recvcounts, displs, MPI_INT,
+                        MPI_COMM_WORLD);
+    } else {
+        MPI_Allgatherv (send_buf, 0, MPI_INT, recv_buff, recvcounts, displs, MPI_INT,
+                        MPI_COMM_WORLD);
+    }
+
+    for (int i = 0; i < fd->hints->cb_nodes; i++) {
+        myprintf ("ranklist[%d] = %d\n", i, fd->hints->ranklist[i]);
+        for (int j = 0; j < num_phases; j++) {
+            myprintf ("\tphase_order[%d] = %d\n", j, recv_buff[i * num_phases + j]);
+        }
+    }
+
+    if (send_buf != NULL) { ADIOI_Free (send_buf); }
+    if (recvcounts != NULL) { ADIOI_Free (recvcounts); }
+    if (displs != NULL) { ADIOI_Free (displs); }
+}
+
+
 
 /* If successful, error_code is set to MPI_SUCCESS.  Otherwise an error code is
  * created and returned in error_code.
@@ -843,12 +887,12 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     int **recv_start_pos=NULL;
     int *send_curr_offlen_ptr, *send_size;
     int batch_idx, *nreqs, batch_nreqs, cb_nodes, striping_unit;
-    ADIO_Offset end_loc, req_off, iter_end_off, *off_list, step_size;
+    ADIO_Offset end_loc, req_off, *off_list, step_size;
     ADIO_Offset *this_buf_idx, buftype_extent;
     ADIOI_Flatlist_node *flat_buf = NULL;
     off_len_list *srt_off_len = NULL;
     double start_time;
-    int m, *phase_order;
+    int m, *phase_orders;
 
     *error_code = MPI_SUCCESS;
 
@@ -983,7 +1027,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
      * boundary, iter_end_off is the ending file offset of aggregate write
      * region of iteration m, upward aligned to the file stripe boundary.
      */
-    iter_end_off = min_st_loc + step_size;
+    // iter_end_off = min_st_loc + step_size;
 
     /* the number of off-len pairs to be received from each proc in a round. */
     recv_count = (int**) ADIOI_Malloc(3 * nbufs * sizeof(int*));
@@ -1038,18 +1082,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     int flat_buf_sz = (buftype_is_contig) ? 0 : flat_buf->blocklens[0];
 
     myprintf("Total ntimes=%d\n", ntimes);
-    phase_order = (int*) ADIOI_Malloc(ntimes * sizeof(int));
-    if (myrank == 0) {
-        for (m = 0; m < ntimes; m++) {
-            phase_order[m] = m;
-        }
-        shuffle_array(phase_order, ntimes);
-    }
-    MPI_Bcast(phase_order, ntimes, MPI_INT, 0, fd->comm);
+    phase_orders = (int*) ADIOI_Malloc(cb_nodes * ntimes * sizeof(int));
+    determine_phase_order(fd, myrank, nprocs, ntimes, phase_orders);
 
-    for (m = 0; m < ntimes; m++) {
-        myprintf("phase_order[%d]=%d\n", m, phase_order[m]);
-    }
     for(i = 0; i< cb_nodes; i++){
         myprintf("my_req[%d].count=%d\n", i, my_req[i].count);
 
@@ -1059,18 +1094,15 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     }
 
     for (m = 0; m < ntimes; m++) {
-        int real_size;
-        ADIO_Offset real_off;
-        ADIO_Offset iter_range_st;
-        ADIO_Offset iter_range_ed;
-        mphase = phase_order[m];
-        // mphase = m;
-        iter_range_st = min_st_loc + mphase * step_size;
-        iter_range_ed = iter_range_st + step_size;
+        // init to -1 for error checking
+        int real_size = -1;
+        ADIO_Offset real_off = -1;
+        ADIO_Offset iter_range_st = -1;
+        ADIO_Offset iter_range_ed = -1;
+        mphase = -1;
 
         myprintf("====================================================\n");
-        myprintf("current two_phase mphase[%d] = %d, iter_end_off=%lld\n", m, mphase, iter_end_off);
-        myprintf("iter_range_st=%lld, iter_range_ed=%lld\n", iter_range_st, iter_range_ed);
+        myprintf("current two_phase idx=%d\n", m);
 
         /* Note that MPI standard requires that displacements in filetypes are
          * in a monotonically non-decreasing order and that, for writes, the
@@ -1103,61 +1135,60 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         for (i = 0; i < cb_nodes; i++)
             send_size[i] = 0;
 
-        real_off = off_list[mphase];
-        real_size = (int) MPL_MIN(striping_unit - real_off % striping_unit, end_loc - real_off + 1);
-
-        /* First calculate what should be communicated, by going through all
-         * others_req and my_req to check which will be sent and received in
-         * this round.
+        /* First calculate what should be communicated/sent from me (this rank)
+         * to aggregators in this round, by going through all my_req.
          */
-
         for (i = 0; i < cb_nodes; i++) {
-<<<<<<< HEAD
-            if (my_req[i].count) { /* No. this rank's off-len pairs to be sent to aggregetor i */
-
-                if (send_curr_offlen_ptr[i] == my_req[i].count)
-                    continue; /* done with aggregator i */
-
-                if (buftype_is_contig)
-                    this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]];
-                for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
-                    if (my_req[i].offsets[j] < iter_end_off)
-=======
-            int start_this_buf_idx = -1;
+            mphase = phase_orders[i * ntimes + m];
+            iter_range_st = min_st_loc + mphase * step_size;
+            iter_range_ed = iter_range_st + step_size;
+            int start_j = -1;
+            myprintf("cb_nodes[%d] has mphase=%d: my_req[%d].count=%d, iter_range_st=%lld, iter_range_ed=%lld\n", i, mphase, i, my_req[i].count, iter_range_st, iter_range_ed);
             if (my_req[i].count) {
                 for (j = 0; j < my_req[i].count; j++) {
-                    myprintf("before check: cnt=%d, my_req[%d].offsets[%d]=%lld\n", my_req[i].count, i, j, my_req[i].offsets[j]);
+                    myprintf("\tbefore check: cnt=%d, my_req[%d].offsets[%d]=%lld\n", my_req[i].count, i, j, my_req[i].offsets[j]);
                     if (my_req[i].offsets[j] < iter_range_ed && my_req[i].offsets[j] >= iter_range_st){
-                        if (start_this_buf_idx < 0) {
-                            start_this_buf_idx = j;
+                        if (start_j < 0) {
+                            start_j = j;
                             if (buftype_is_contig)
                                 this_buf_idx[i] = buf_idx[i][j];
                         }
->>>>>>> f2f20b378 (try reorder)
                         send_size[i] += my_req[i].lens[j];
-                        myprintf("my_req[i].offsets[j]=%lld\n", my_req[i].offsets[j]);
+                        myprintf("\tafter check: my_req[i].offsets[j]=%lld\n", my_req[i].offsets[j]);
                     }
                 }
             }
         }
-        for (i = 0; i < nprocs; i++) {
-            if (others_req[i].count) {
-                int start_j = -1;
-                for (j = 0; j < others_req[i].count; j++) {
-                    if (others_req[i].offsets[j] < iter_range_ed && others_req[i].offsets[j] >= iter_range_st){
-                        if (start_j < 0) {
-                            start_j = j;
-                            recv_start_pos[ibuf][i] = j;
+
+        /* Then calculate what will be communicated/received to me (this aggregator)
+         * from all procs in this round, by going through all others_req.
+         *
+         * non-aggregators do not need to calculate this.
+         */
+        if (fd->is_agg) {
+            mphase        = phase_orders[my_aggr_idx * ntimes + m];
+            iter_range_st = min_st_loc + mphase * step_size;
+            iter_range_ed = iter_range_st + step_size;
+            real_off      = off_list[mphase];
+            real_size = (int)MPL_MIN (striping_unit - real_off % striping_unit, end_loc - real_off + 1);
+            for (i = 0; i < nprocs; i++) {
+                if (others_req[i].count) {
+                    int start_j = -1;
+                    for (j = 0; j < others_req[i].count; j++) {
+                        if (others_req[i].offsets[j] < iter_range_ed &&
+                            others_req[i].offsets[j] >= iter_range_st) {
+                            if (start_j < 0) {
+                                start_j                 = j;
+                                recv_start_pos[ibuf][i] = j;
+                            }
+                            recv_count[ibuf][i]++;
+                            others_req[i].mem_ptrs[j] = (MPI_Aint)(others_req[i].offsets[j] - real_off);
+                            recv_size[ibuf][i] += others_req[i].lens[j];
                         }
-                        recv_count[ibuf][i]++;
-                        others_req[i].mem_ptrs[j] =
-                            (MPI_Aint) (others_req[i].offsets[j] - real_off);
-                        recv_size[ibuf][i] += others_req[i].lens[j];
                     }
                 }
             }
         }
-        iter_end_off += step_size;
 
         myprintf("\t send_size: me (writer) ==> agg_i send size:\n");
         for (i = 0; i < cb_nodes; i++){
@@ -1360,7 +1391,7 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                 if (srt_off_len[j].num == 0)
                     continue;
 
-                mphase = phase_order[batch_idx + j];
+                mphase = phase_orders[my_aggr_idx * ntimes + batch_idx + j];
                 real_off = off_list[mphase];
 
                 myprintf("batch_idx=%d, j=%d, m=%d, real_off=%lld\n", batch_idx, j, mphase, real_off);
@@ -1422,7 +1453,10 @@ assert(req_ptr - reqs <= n_send_recv_ub);
     }
 
   over:
-    ADIOI_Free(phase_order);
+    if (phase_orders != NULL) {
+        ADIOI_Free(phase_orders);
+    }
+
     ADIOI_Free(reqs);
     ADIOI_Free(nreqs);
     if (srt_off_len)
@@ -1679,6 +1713,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(
     }
 
     /* data sieving */
+    // only aggregators do data sieving, non-aggregators have hole==0
     if (fd->hints->ds_write != ADIOI_HINT_DISABLE && hole) {
         ADIO_ReadContig(fd, write_buf, real_size, MPI_BYTE, ADIO_EXPLICIT_OFFSET,
                         real_off, &status, &err);
