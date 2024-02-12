@@ -855,10 +855,10 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
                 myprintf ("my phase_order[%d]=%d\n", i, send_buf[i]);
             }
             MPI_Allgatherv (send_buf, num_phases, MPI_INT, phase_orders, recvcounts, displs,
-                            MPI_INT, MPI_COMM_WORLD);
+                            MPI_INT, fd->comm);
         } else {
             MPI_Allgatherv (send_buf, 0, MPI_INT, phase_orders, recvcounts, displs, MPI_INT,
-                            MPI_COMM_WORLD);
+                            fd->comm);
         }
     }
 
