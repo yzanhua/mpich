@@ -26,8 +26,8 @@ void ADIO_Close(ADIO_File fd, int *error_code)
     MPI_Reduce(&fd->two_phase_total_time, &max_two_phase_total, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
     MPI_Reduce(&fd->io_phase_time, &max_io_phase_time, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
     if (myrank == 0) {
-        FPRINTF(stdout, "Total Two-phase time: %f\n", max_two_phase_total);
-        FPRINTF(stdout, "Total I/O phase time: %f\n", max_io_phase_time);
+        FPRINTF(stdout, "Total Two-phase time for %s: %f\n", fd->filename, max_two_phase_total);
+        FPRINTF(stdout, "Total I/O phase time for %s: %f\n", fd->filename, max_io_phase_time);
     }
 
     /* because of deferred open, this warants a bit of explaining.  First, if
