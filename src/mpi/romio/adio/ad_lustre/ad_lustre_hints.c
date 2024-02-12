@@ -32,6 +32,7 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
         fd->hints->fs_hints.lustre.co_ratio = 1;
         ADIOI_Info_set(fd->info, "romio_lustre_coll_threshold", "0");
         fd->hints->fs_hints.lustre.coll_threshold = 0;
+        fd->hints->fs_hints.lustre.phase_shuffle = 0;
 
 #ifdef HAVE_LUSTRE_LOCKAHEAD
         /* Set lock ahead default hints */
@@ -72,6 +73,10 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
                 ADIOI_Info_set(fd->info, "direct_write", "true");
                 fd->direct_write = 1;
             }
+
+            ADIOI_Info_check_and_install_int(fd, users_info, "romio_lustre_phase_shuffle",
+                                             &(fd->hints->fs_hints.lustre.phase_shuffle), myname,
+                                             error_code);
 #ifdef HAVE_LUSTRE_LOCKAHEAD
             /* Get lock ahead hints */
 

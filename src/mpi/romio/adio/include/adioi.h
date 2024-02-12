@@ -81,6 +81,7 @@ struct ADIOI_Hints_struct {
             int lock_ahead_flags;
             ADIO_Offset lock_ahead_start_extent;
             ADIO_Offset lock_ahead_end_extent;
+            int phase_shuffle;  // 0: no phase shuffling, 1: random shuffling (global same order) // 2: individul process random shuffling
         } lustre;
         struct {
             unsigned read_chunk_sz;     /* chunk size for direct reads */

@@ -802,42 +802,71 @@ static void shuffle_array(int *array, int n, int myrank) {
     }
 }
 
-static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_phases, int *recv_buff) {
+static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_phases, int *phase_orders) {
     int *send_buf   = NULL;
     int *recvcounts = NULL;
     int *displs     = NULL;
     int start_pos   = 0;
+    int phase_shuffle = 0;
+    phase_shuffle = fd->hints->fs_hints.lustre.phase_shuffle;
+    myprintf("phase_shuffle hint: %d\n", phase_shuffle);
 
-    // fd->hints->ranklist
-    // fd->is_agg whether I am an aggregator
-
-    // calloc: init to 0
-    recvcounts = (int *)ADIOI_Calloc (nprocs, sizeof (int));
-    displs     = (int *)ADIOI_Calloc (nprocs, sizeof (int));
-
-    for (int agg_id = 0; agg_id < fd->hints->cb_nodes; agg_id++) {
-        int agg_rank         = fd->hints->ranklist[agg_id];
-        recvcounts[agg_rank] = num_phases;
-        displs[agg_rank]     = start_pos;
-        start_pos += num_phases;
-    }
-
-    if (fd->is_agg) {
+    if (phase_shuffle != 1 && phase_shuffle != 2) {
+        // default: phase_shuffle = 0; no shuffle
+        for (int i = 0; i < fd->hints->cb_nodes; i++) {
+            for (int j = 0; j < num_phases; j++) {
+                phase_orders[i * num_phases + j] = j;
+            }
+        }
+    } else if (phase_shuffle == 1) {
+        // random shuffle, but the same for all ranks
         send_buf = (int *)ADIOI_Malloc (num_phases * sizeof (int));
-        for (int i = 0; i < num_phases; i++) { send_buf[i] = i; }
-        shuffle_array (send_buf, num_phases, myrank);
-        for (int i = 0; i < num_phases; i++) { myprintf("my phase_order[%d]=%d\n", i, send_buf[i]); }
-        MPI_Allgatherv (send_buf, num_phases, MPI_INT, recv_buff, recvcounts, displs, MPI_INT,
-                        MPI_COMM_WORLD);
-    } else {
-        MPI_Allgatherv (send_buf, 0, MPI_INT, recv_buff, recvcounts, displs, MPI_INT,
-                        MPI_COMM_WORLD);
+        if (myrank == 0) {
+            for (int i = 0; i < num_phases; i++) { send_buf[i] = i; }
+            shuffle_array (send_buf, num_phases, myrank);
+        }
+        MPI_Bcast (send_buf, num_phases, MPI_INT, 0, fd->comm);
+        for (int i = 0; i < fd->hints->cb_nodes; i++) {
+            for (int j = 0; j < num_phases; j++) {
+                phase_orders[i * num_phases + j] = send_buf[j];
+            }
+        }
+    } else if (phase_shuffle == 2) {
+        // random shuffle, different for all ranks
+        // fd->hints->cb_nodes (number of aggregators)
+        // fd->hints->ranklist (aggregator ranks)
+        // fd->is_agg whether I am an aggregator
+
+        // calloc: init to 0
+        recvcounts = (int *)ADIOI_Calloc (nprocs, sizeof (int));
+        displs     = (int *)ADIOI_Calloc (nprocs, sizeof (int));
+        for (int agg_id = 0; agg_id < fd->hints->cb_nodes; agg_id++) {
+            int agg_rank         = fd->hints->ranklist[agg_id];
+            recvcounts[agg_rank] = num_phases;
+            displs[agg_rank]     = start_pos;
+            start_pos += num_phases;
+        }
+
+        if (fd->is_agg) {
+            send_buf = (int *)ADIOI_Malloc (num_phases * sizeof (int));
+            for (int i = 0; i < num_phases; i++) { send_buf[i] = i; }
+            shuffle_array (send_buf, num_phases, myrank);
+            for (int i = 0; i < num_phases; i++) {
+                myprintf ("my phase_order[%d]=%d\n", i, send_buf[i]);
+            }
+            MPI_Allgatherv (send_buf, num_phases, MPI_INT, phase_orders, recvcounts, displs,
+                            MPI_INT, MPI_COMM_WORLD);
+        } else {
+            MPI_Allgatherv (send_buf, 0, MPI_INT, phase_orders, recvcounts, displs, MPI_INT,
+                            MPI_COMM_WORLD);
+        }
     }
 
+    // print phase_order
     for (int i = 0; i < fd->hints->cb_nodes; i++) {
         myprintf ("ranklist[%d] = %d\n", i, fd->hints->ranklist[i]);
         for (int j = 0; j < num_phases; j++) {
-            myprintf ("\tphase_order[%d] = %d\n", j, recv_buff[i * num_phases + j]);
+            myprintf ("\tphase_order[%d] = %d\n", j, phase_orders[i * num_phases + j]);
         }
     }
 
