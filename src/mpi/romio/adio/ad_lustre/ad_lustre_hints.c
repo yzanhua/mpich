@@ -14,6 +14,7 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
 {
     int flag;
     static char myname[] = "ADIOI_LUSTRE_SETINFO";
+    char *p = NULL;
 
     if (fd->hints->initialized && users_info == MPI_INFO_NULL) {
         *error_code = MPI_SUCCESS;
@@ -74,9 +75,12 @@ void ADIOI_LUSTRE_SetInfo(ADIO_File fd, MPI_Info users_info, int *error_code)
                 fd->direct_write = 1;
             }
 
-            ADIOI_Info_check_and_install_int(fd, users_info, "romio_lustre_phase_shuffle",
-                                             &(fd->hints->fs_hints.lustre.phase_shuffle), myname,
-                                             error_code);
+            ADIOI_Info_check_and_install_int (fd, users_info, "romio_lustre_phase_shuffle",
+                                              &(fd->hints->fs_hints.lustre.phase_shuffle), myname,
+                                              error_code);
+            p = getenv ("ROMIO_LUSTRE_PHASE_SHUFFLE");
+            if (p != NULL) { fd->hints->fs_hints.lustre.phase_shuffle = atoi (p); }
+
 #ifdef HAVE_LUSTRE_LOCKAHEAD
             /* Get lock ahead hints */
 
