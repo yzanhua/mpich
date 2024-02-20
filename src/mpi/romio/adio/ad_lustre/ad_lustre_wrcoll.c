@@ -1642,13 +1642,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
              */
             MEMCPY_UNPACK(myrank, (*send_buf)[my_aggr_idx], start_pos, recv_count, write_buf);
     }
-
-    /* free send_buf[] if allocated */
-    if (*send_buf != NULL) {
-        ADIOI_Free((*send_buf)[0]);
-        ADIOI_Free(*send_buf);
-        *send_buf = NULL;
-    }
 }
 
 
