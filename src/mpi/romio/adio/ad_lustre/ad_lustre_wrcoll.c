@@ -10,13 +10,13 @@
 #include <stdlib.h>
 #include <time.h>
 
-#define ZH_PRINT {printf("DEBUG %d: %s:%s:%d\t---------------\t", myrank, __FILE__, __func__, __LINE__);}
+#define ZH_PRINT {printf("DEBUG: %s:%s:%d\t---------------\t", __FILE__, __func__, __LINE__);}
 
-#define myprintf(...) { \
-    ZH_PRINT; \
-    printf(__VA_ARGS__); \
-}
-
+// #define myprintf(...) { \
+//     ZH_PRINT; \
+//     printf(__VA_ARGS__); \
+// }
+#define myprintf(...) {}
 
 #ifdef HAVE_LUSTRE_LOCKAHEAD
 /* in ad_lustre_lock.c */
@@ -66,6 +66,7 @@ typedef struct {
 } off_len_list;
 
 
+static ADIO_Offset agg_send_size = 0;
 /* prototypes of functions used for collective writes only. */
 static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                         const void *buf,
@@ -128,6 +129,20 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
 void ADIOI_Heap_merge(ADIOI_Access * others_req, int *count,
                       ADIO_Offset * srt_off, int *srt_len, int *start_pos,
                       int nprocs, int nprocs_recv, int total_elements);
+void ZH_test (ADIO_File fd,
+                     const void *buf,
+                     const ADIOI_Flatlist_node *flat_buf,
+                     char **send_buf,
+                     ADIO_Offset *offset_list,
+                     ADIO_Offset *len_list,
+                     ADIO_Offset total_send_size_iter,
+                     const int *send_size,
+                     MPI_Request *send_reqs,
+                     int *n_send_reqs, /* number of issend posted */
+                     int contig_access_count,
+                     int my_aggr_idx,
+                     int iter,
+                     ADIO_Offset buftype_extent);
 
 static void ADIOI_LUSTRE_IterateOneSided(ADIO_File fd, const void *buf, int *striping_info,
                                          ADIO_Offset * offset_list, ADIO_Offset * len_list,
@@ -921,7 +936,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     ADIOI_Flatlist_node *flat_buf = NULL;
     off_len_list *srt_off_len = NULL;
     double start_time;
-    int m, *phase_orders;
+    int m, *phase_orders=NULL;
 
     *error_code = MPI_SUCCESS;
 
@@ -1167,6 +1182,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         /* First calculate what should be communicated/sent from me (this rank)
          * to aggregators in this round, by going through all my_req.
          */
+        agg_send_size = 0;
         for (i = 0; i < cb_nodes; i++) {
             mphase = phase_orders[i * ntimes + m];
             iter_range_st = min_st_loc + mphase * step_size;
@@ -1175,15 +1191,19 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
             myprintf("cb_nodes[%d] has mphase=%d: my_req[%d].count=%d, iter_range_st=%lld, iter_range_ed=%lld\n", i, mphase, i, my_req[i].count, iter_range_st, iter_range_ed);
             if (my_req[i].count) {
                 for (j = 0; j < my_req[i].count; j++) {
-                    myprintf("\tbefore check: cnt=%d, my_req[%d].offsets[%d]=%lld\n", my_req[i].count, i, j, my_req[i].offsets[j]);
-                    if (my_req[i].offsets[j] < iter_range_ed && my_req[i].offsets[j] >= iter_range_st){
-                        if (start_j < 0) {
-                            start_j = j;
-                            if (buftype_is_contig)
-                                this_buf_idx[i] = buf_idx[i][j];
+                    myprintf ("\tbefore check: cnt=%d, my_req[%d].offsets[%d]=%lld\n",
+                              my_req[i].count, i, j, my_req[i].offsets[j]);
+                    if (my_req[i].offsets[j] < iter_range_ed) {
+                        agg_send_size += my_req[i].lens[j];
+                        if (my_req[i].offsets[j] >= iter_range_st) {
+                            if (start_j < 0) {
+                                start_j = j;
+                                if (buftype_is_contig) this_buf_idx[i] = buf_idx[i][j];
+                            }
+                            send_size[i] += my_req[i].lens[j];
+                            myprintf ("\tafter check: my_req[i].offsets[j]=%lld\n",
+                                      my_req[i].offsets[j]);
                         }
-                        send_size[i] += my_req[i].lens[j];
-                        myprintf("\tafter check: my_req[i].offsets[j]=%lld\n", my_req[i].offsets[j]);
                     }
                 }
             }
@@ -1837,6 +1857,7 @@ ADIOI_Assert(buf_idx[i] != -1);
             }
         }
     } else if (nprocs_send) {
+        myprintf("something wrong\n");
         /* If buftype_is_contig is not true, allocate send_buf[] a
          * contiguous space, copy data to send_buf, including ones to be sent
          * to self, and then use send_buf to send.
@@ -1849,12 +1870,14 @@ ADIOI_Assert(buf_idx[i] != -1);
         for (i = 1; i < cb_nodes; i++)
             (*send_buf)[i] = (*send_buf)[i - 1] + send_size[i - 1];
 
-        ADIOI_LUSTRE_Fill_send_buffer(fd, buf, n_buftypes, flat_buf_idx,
-                                      flat_buf_sz, flat_buf, (*send_buf),
-                                      fileview_indx, offset_list, len_list,
-                                      total_send_size_iter, send_size, reqs, &nsend,
-                                      contig_access_count, my_aggr_idx, iter,
-                                      buftype_extent);
+        // ADIOI_LUSTRE_Fill_send_buffer(fd, buf, n_buftypes, flat_buf_idx,
+        //                               flat_buf_sz, flat_buf, (*send_buf),
+        //                               fileview_indx, offset_list, len_list,
+        //                               total_send_size_iter, send_size, reqs, &nsend,
+        //                               contig_access_count, my_aggr_idx, iter,
+        //                               buftype_extent);
+
+        ZH_test(fd, buf, flat_buf, (*send_buf), offset_list, len_list, total_send_size_iter, send_size, reqs, &nsend, contig_access_count, my_aggr_idx, iter, buftype_extent);
         /* MPI_Issend calls have been posted in ADIOI_Fill_send_buffer. It is
          * possible nsend is 0.
          * Send buffers must not be touched before MPI_Waitall() is completed,
@@ -1939,6 +1962,215 @@ num_memcpy++; \
     } \
 }
 
+void ZH_test (ADIO_File fd,
+                     const void *buf,
+                     const ADIOI_Flatlist_node *flat_buf,
+                     char **send_buf,
+                     ADIO_Offset *offset_list,
+                     ADIO_Offset *len_list,
+                     ADIO_Offset total_send_size_iter,
+                     const int *send_size,
+                     MPI_Request *send_reqs,
+                     int *n_send_reqs, /* number of issend posted */
+                     int contig_access_count,
+                     int my_aggr_idx,
+                     int iter,
+                     ADIO_Offset buftype_extent) {
+    /* this function is only called if buftype is not contig */
+    int ii, jj, q, size, send_size_rem = 0;
+    int first_q = -1, copy_size_delayed, isUserBuf;
+    char *user_buf_ptr, *send_buf_ptr, *same_buf_ptr;
+    ADIO_Offset off, len, rem_len, user_buf_idx;
+
+    myprintf("####################\n");
+    myprintf ("phase iter:%d total_send_size_iter=%lld\n", iter, total_send_size_iter);
+    // long send
+    for (int p = 0; p < fd->hints->cb_nodes; p++) {
+        myprintf ("send_size[%d]=%d\n", p, send_size[p]);
+    }
+    myprintf("total_send_size_iter=%lld\n", total_send_size_iter);
+    myprintf("agg_send_size=%lld\n", agg_send_size);
+    
+
+    int n_buftypes = 0;
+    int flat_buf_idx = 0;
+    int flat_buf_sz = flat_buf->blocklens[0];;
+    int fileview_indx = 0;
+    ADIO_Offset prev_send_size = agg_send_size - total_send_size_iter;
+    user_buf_idx =
+        flat_buf->indices[flat_buf_idx] + flat_buf->blocklens[flat_buf_idx] - (flat_buf_sz);
+    ADIO_Offset curr_off = 0;
+
+    while (prev_send_size) {
+        int size_in_buf = MPL_MIN (prev_send_size, flat_buf_sz);
+        user_buf_idx += size_in_buf;
+        flat_buf_sz -= size_in_buf;
+        if (flat_buf_sz == 0) { /* move on to next flat_buf segment */
+            if (flat_buf_idx < (flat_buf->count - 1))
+                (flat_buf_idx)++;
+            else {
+                flat_buf_idx = 0;
+                (n_buftypes)++;
+            }
+            flat_buf_sz  = flat_buf->blocklens[flat_buf_idx];
+        }
+        prev_send_size -= size_in_buf;
+    }
+    
+    // print n_buftypes flat_buf_idx flat_buf_sz fileview_indx;
+    
+    prev_send_size = agg_send_size - total_send_size_iter;
+    while(prev_send_size) {
+        if (prev_send_size >= len_list[fileview_indx]) {
+            prev_send_size -= len_list[fileview_indx];
+            fileview_indx++;
+        } else {
+            curr_off = prev_send_size;
+            prev_send_size = 0;
+        }
+    }
+
+    jj = 0;
+
+    user_buf_idx = flat_buf->indices[flat_buf_idx] + flat_buf->blocklens[flat_buf_idx] - (flat_buf_sz);
+    int num_memcpy = 0;
+
+    /* contig_access_count: the number of contiguous file segments this
+     *     rank writes to. Each segment i is described by offset_list[i] and
+     *     len_list[i].
+     * fileview_indx: the index to the offset_list[], len_list[] that have been
+     *     processed in the previous round.
+     * For each contiguous off-len pair in this rank's file view, pack write
+     * data into send buffers, send_buf[].
+     */
+    for (ii = fileview_indx; ii < contig_access_count; ii++) {
+        off     = offset_list[ii] + curr_off;
+        rem_len = len_list[ii] - curr_off;
+        curr_off = 0;
+        myprintf ("\toff=%lld, rem_len=%lld\n", off, rem_len);
+
+        /* this off-len request may span to more than one I/O aggregator */
+        while (rem_len != 0) {
+            len = rem_len;
+            q   = ADIOI_LUSTRE_Calc_aggregator (fd, off, &len);
+
+            if (first_q != q) {
+                if (send_size_rem != 0) {
+                    myprintf("DEBUG wrong: send_size_rem=%d\n", send_size_rem);
+                }
+                ADIOI_Assert (send_size_rem == 0);
+                first_q           = q;
+                isUserBuf         = 1;
+                send_size_rem     = send_size[q];
+                copy_size_delayed = 0;
+                same_buf_ptr      = (char *)buf + user_buf_idx; /* no increment */
+                user_buf_ptr      = same_buf_ptr;               /* increment after each memcpy */
+                send_buf_ptr      = send_buf[q];                /* increment after each memcpy */
+            }
+
+            /* copy len amount of data from buf to send_buf[q] */
+            size = (int)len;
+            myprintf ("\tq=%d, len=%lld, size=%d, send_size_rem=%d, num_memcpy=%d, isUserBuf=%d\n",
+                      q, len, size, send_size_rem, num_memcpy, isUserBuf);
+            {  // ADIOI_BUF_COPY
+                while (size) {
+                    int size_in_buf = MPL_MIN (size, flat_buf_sz);
+                    myprintf ("\tsize_in_buf=%d, size=%d, flat_buf_sz=%d\n", size_in_buf, size,
+                              flat_buf_sz);
+                    copy_size_delayed += size_in_buf;
+                    user_buf_idx += size_in_buf;
+                    send_size_rem -= size_in_buf;
+                    flat_buf_sz -= size_in_buf;
+                    myprintf ("\tflat_buf_sz=%d, send_size_rem=%d, copy_size_delayed=%d\n",
+                              flat_buf_sz, send_size_rem, copy_size_delayed);
+                    myprintf ("\tdest %p, src %p, count %d\n", send_buf_ptr, user_buf_ptr,
+                              copy_size_delayed);
+                    if (flat_buf_sz == 0) { /* move on to next flat_buf segment */
+                        if (send_size_rem) { /* after this copy send_buf[q] is still not full */
+                            isUserBuf = 0;
+                            myprintf ("\tmemcpy 0 dest %p, src %p, count %d\n", send_buf_ptr,
+                                      user_buf_ptr, copy_size_delayed);
+                            memcpy (send_buf_ptr, user_buf_ptr, copy_size_delayed);
+                            send_buf_ptr += copy_size_delayed;
+                            copy_size_delayed = 0;
+                            num_memcpy++;
+                        } else if (isUserBuf == 0) {
+                            /* send_buf[q] is full and not using user buf, \
+                                                    * copy the remaining delayed data */
+                            myprintf ("\tmemcpy 1 dest %p, src %p, count %d\n", send_buf_ptr,
+                                      user_buf_ptr, copy_size_delayed);
+                            memcpy (send_buf_ptr, user_buf_ptr, copy_size_delayed);
+                            num_memcpy++;
+                        }
+                         /* update flat_buf_idx, flat_buf_sz,
+                                                        n_buftypes, and user_buf_idx */
+                        if (flat_buf_idx < (flat_buf->count - 1))
+                            (flat_buf_idx)++;
+                        else {
+                            flat_buf_idx = 0;
+                            (n_buftypes)++;
+                        }
+                        user_buf_idx = flat_buf->indices[flat_buf_idx] +
+                                       (ADIO_Offset)(n_buftypes) * buftype_extent;
+                        flat_buf_sz = flat_buf->blocklens[flat_buf_idx];
+                        user_buf_ptr = (char *)buf + user_buf_idx;
+                    } else if (send_size_rem == 0 &&
+                               isUserBuf ==
+                                   0) { /* *flat_buf_sz > 0, send_buf[q] is full, and not using user
+                                         * \ buf to send, copy the remaining delayed data */
+                        myprintf ("\tmemcpy 2 dest %p, src %p, count %d\n", send_buf_ptr,
+                                  user_buf_ptr, copy_size_delayed);
+                        memcpy (send_buf_ptr, user_buf_ptr, copy_size_delayed);
+                        user_buf_ptr += copy_size_delayed;
+                        num_memcpy++;
+                    }
+                    size -= size_in_buf;
+                }
+            }
+            myprintf ("\tq=%d, len=%lld, size=%d, send_size_rem=%d, num_memcpy=%d, isUserBuf=%d\n",
+                      q, len, size, send_size_rem, num_memcpy, isUserBuf);
+
+            if (send_size_rem == 0) { /* data to q is fully packed */
+                first_q = -1;
+
+                if (q != my_aggr_idx) { /* send only if not self rank */
+                    /* get the aggregator's MPI rank ID */
+                    int dest = fd->hints->ranklist[q];
+                    if (isUserBuf) {
+                        myprintf ("MPI_Issend: send_size[q]=%d, same_buf_ptr=%p\n", send_size[q],
+                                  same_buf_ptr);
+                        MPI_Issend (same_buf_ptr, send_size[q], MPI_BYTE, dest,
+                                    ADIOI_COLL_TAG (dest, iter), fd->comm, &send_reqs[jj++]);
+                    }
+
+                    else {
+                        myprintf ("MPI_Issend: send_size[q]=%d, send_buf[q]=%p\n", send_size[q],
+                                  send_buf[q]);
+                        MPI_Issend (send_buf[q], send_size[q], MPI_BYTE, dest,
+                                    ADIOI_COLL_TAG (dest, iter), fd->comm, &send_reqs[jj++]);
+                    }
+
+                } else if (isUserBuf) { /* send buffer is also (part of) buf */
+                    /* send to self and user buf is contiguous, then make a
+                     * single memcpy from buf directly to send_buf[q]
+                     */
+                    myprintf ("MPI_Issend: send_size[q]=%d, send_buf[q]=%p\n", send_size[q],
+                              send_buf[q]);
+                    memcpy (send_buf[q], same_buf_ptr, send_size[q]);
+                }
+            }
+            /* len is the amount of data copied */
+            off += len;
+            rem_len -= len;
+            total_send_size_iter -= len;
+            if (total_send_size_iter == 0) goto done;
+        }
+    }
+done:
+    *n_send_reqs = jj;
+    return;
+}
+
 static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
                                           const void *buf,
                                           int *n_buftypes,
@@ -1963,6 +2195,9 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
     int first_q=-1, copy_size_delayed, isUserBuf;
     char *user_buf_ptr, *send_buf_ptr, *same_buf_ptr;
     ADIO_Offset off, len, rem_len, user_buf_idx;
+
+    ZH_test(fd, buf, flat_buf, send_buf, offset_list, len_list, total_send_size_iter, send_size, send_reqs, n_send_reqs, contig_access_count, my_aggr_idx, iter, buftype_extent);
+    myprintf("phase iter:%d total_send_size_iter=%lld\n", iter, total_send_size_iter);
 
     jj = 0;
 
@@ -2038,7 +2273,9 @@ int num_memcpy = 0;
 
             /* copy len amount of data from buf to send_buf[q] */
             size = (int)len;
+            myprintf("\tq=%d, len=%lld, size=%d, send_size_rem=%d, num_memcpy=%d, isUserBuf=%d\n", q, len, size, send_size_rem, num_memcpy, isUserBuf);
             ADIOI_BUF_COPY
+            myprintf("\tq=%d, len=%lld, size=%d, send_size_rem=%d, num_memcpy=%d, isUserBuf=%d\n", q, len, size, send_size_rem, num_memcpy, isUserBuf);
 
             if (send_size_rem == 0) { /* data to q is fully packed */
                 first_q = -1;
@@ -2046,17 +2283,21 @@ int num_memcpy = 0;
                 if (q != my_aggr_idx) { /* send only if not self rank */
                     /* get the aggregator's MPI rank ID */
                     int dest = fd->hints->ranklist[q];
-                    if (isUserBuf)
+                    if (isUserBuf) {
+                        myprintf("MPI_Issend: send_size[q]=%d, same_buf_ptr=%p\n", send_size[q], same_buf_ptr);
                         MPI_Issend(same_buf_ptr, send_size[q], MPI_BYTE, dest,
                                    ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
-                    else
+                    } else {
+                        myprintf("MPI_Issend: send_size[q]=%d, send_buf[q]=%p\n", send_size[q], send_buf[q]);
                         MPI_Issend(send_buf[q], send_size[q], MPI_BYTE, dest,
                                    ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
+                    }
                 }
                 else if (isUserBuf) { /* send buffer is also (part of) buf */
                     /* send to self and user buf is contiguous, then make a
                      * single memcpy from buf directly to send_buf[q]
                      */
+                    myprintf("MPI_Issend: send_size[q]=%d, send_buf[q]=%p\n", send_size[q], send_buf[q]);
                     memcpy(send_buf[q], same_buf_ptr, send_size[q]);
                 }
             }
