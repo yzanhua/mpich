@@ -993,7 +993,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
          */
         for (i = 0; i < cb_nodes; i++) {
             if (my_req[i].count) {
-                if (buftype_is_contig)
+                if (buftype_is_contig && send_curr_offlen_ptr[i] < my_req[i].count)
                     this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]];
                 for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
                     if (my_req[i].offsets[j] < iter_end_off)
