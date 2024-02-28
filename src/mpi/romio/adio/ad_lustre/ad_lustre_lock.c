@@ -11,6 +11,15 @@
 #include <unistd.h>
 #endif
 
+#ifdef MIMIC_LUSTRE
+void ADIOI_LUSTRE_lock_ahead_ioctl(ADIO_File fd, int avail_cb_nodes, ADIO_Offset next_offset, int *error_code)
+{ return 0; }
+int ADIOI_LUSTRE_clear_locks(ADIO_File fd)
+{ return 0; }
+int ADIOI_LUSTRE_request_only_lock_ioctl(ADIO_File fd)
+{ return 0; }
+#else
+
 #include <stdint.h>
 
 /* If necessary (older luster client headers) define the new
@@ -405,3 +414,4 @@ void ADIOI_LUSTRE_lock_ahead_ioctl(ADIO_File fd, int avail_cb_nodes, ADIO_Offset
 
     return;
 }
+#endif

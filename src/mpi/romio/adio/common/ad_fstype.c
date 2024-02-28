@@ -477,8 +477,12 @@ static void ADIO_FileSysType_fncall(const char *filename, int *fstype, int *erro
             return;
 #endif
         default:
+#ifdef MIMIC_LUSTRE
+            *fstype = ADIO_LUSTRE;
+#else
             /* UFS support if we don't know what else to use */
             *fstype = ADIO_UFS;
+#endif
             return;
     }
 }
