@@ -54,7 +54,7 @@ int main(int argc, char **argv)
 
 
     if (!rank) {
-        MPI_File_delete(filename, MPI_INFO_NULL);
+        err = MPI_File_delete(filename, MPI_INFO_NULL);
         if (err != MPI_SUCCESS) {
             int errorclass;
             MPI_Error_class(err, &errorclass);

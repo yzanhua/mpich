@@ -98,7 +98,7 @@ void err_handler(int err, char *err_msg)
 
 int main(int argc, char **argv)
 {
-    int err = 0, verbose = 0, rank;
+    int err = 0, verbose = 1, rank;
     char filename[256];
     MPI_File fh;
 
@@ -122,7 +122,9 @@ int main(int argc, char **argv)
         err = -1;
         goto err_out;
     }
-    unlink(filename);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (!rank) unlink(filename);
+    MPI_Barrier(MPI_COMM_WORLD);
     if (verbose && rank == 0)
         fprintf(stdout, " ---- pass\n");
 
@@ -145,7 +147,9 @@ int main(int argc, char **argv)
         err = -1;
         goto err_out;
     }
-    unlink(filename);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (!rank) unlink(filename);
+    MPI_Barrier(MPI_COMM_WORLD);
     if (verbose && rank == 0)
         fprintf(stdout, " ---- pass\n");
 
@@ -167,7 +171,9 @@ int main(int argc, char **argv)
         err = -1;
         goto err_out;
     }
-    unlink(filename);
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (!rank) unlink(filename);
+    MPI_Barrier(MPI_COMM_WORLD);
     if (verbose && rank == 0)
         fprintf(stdout, " ---- pass\n");
 

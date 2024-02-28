@@ -131,8 +131,10 @@ int main(int argc, char **argv)
                       MPI_Finalize();
                       return 1;
         }
-    if (argv[optind] == NULL) strcpy(filename, "testfile.nc");
-    else                      snprintf(filename, 256, "%s", argv[optind]);
+    if (argv[optind] == NULL)
+        sprintf(filename, "%s.out", argv[0]);
+    else
+        snprintf(filename, 256, "%s", argv[optind]);
 
     len = (len <= 0) ? 4 : len;
     nghosts = (nghosts < 0) ? 2 : nghosts;

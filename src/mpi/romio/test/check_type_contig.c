@@ -43,6 +43,9 @@ usage(char *argv0)
 /*----< main() >------------------------------------------------------------*/
 int main(int argc, char **argv)
 {
+#ifdef ROMIO_INSIDE_MPICH
+    return 0;
+#else
     extern int optind;
     extern char *optarg;
     char filename[256];
@@ -68,8 +71,10 @@ int main(int argc, char **argv)
                       MPI_Finalize();
                       return 1;
         }
-    if (argv[optind] == NULL) strcpy(filename, "testfile.nc");
-    else                      snprintf(filename, 256, "%s", argv[optind]);
+    if (argv[optind] == NULL)
+        sprintf(filename, "%s.out", argv[0]);
+    else
+        snprintf(filename, 256, "%s", argv[optind]);
 
     /* create a contiguous data type */
     sizes[0] = sizes[1]  = 10;
@@ -153,5 +158,6 @@ int main(int argc, char **argv)
 err_out:
     MPI_Finalize();
     return (nerrs > 0);
+#endif
 }
 
