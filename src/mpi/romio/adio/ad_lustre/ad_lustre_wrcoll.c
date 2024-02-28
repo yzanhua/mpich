@@ -201,7 +201,7 @@ void ADIOI_LUSTRE_Calc_my_req(
          */
         rem_len = len_list[i] - avail_len;
 
-        while (rem_len != 0) {
+        while (rem_len > 0) {
             off += avail_len;    /* move forward to first remaining byte */
             avail_len = rem_len; /* save remaining size, pass to calc */
             aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
@@ -411,16 +411,6 @@ void ADIOI_LUSTRE_Calc_others_req(
             MPI_Irecv(others_req[i].offsets, 2 * others_req[i].count,
                       ADIO_OFFSET, i, 0, fd->comm, &requests[j++]);
     }
-
-#ifdef WKL_DEBUG
-/* WRF hangs below when calling MPI_Waitall(), at running 16 nodes, 128 ranks per node
- * on Perlmutter, when these 3 env variables are set:
- *    FI_UNIVERSE_SIZE        = 2048
- *    FI_CXI_DEFAULT_CQ_SIZE  = 524288
- *    FI_CXI_RX_MATCH_MODE    = software
- */
-MPI_Barrier(fd->comm); /* This barrier prevents the MPI_Waitall below from hanging !!! */
-#endif
 
     for (i = 0; i < fd->hints->cb_nodes; i++) {
         if (my_req[i].count > 0 && myrank != fd->hints->ranklist[i])
@@ -992,7 +982,11 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
          * this round.
          */
         for (i = 0; i < cb_nodes; i++) {
-            if (my_req[i].count) {
+            if (my_req[i].count) { /* No. this rank's off-len pairs to be sent to aggregetor i */
+
+                if (send_curr_offlen_ptr[i] == my_req[i].count)
+                    continue; /* done with aggregator i */
+
                 if (buftype_is_contig)
                     this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]];
                 for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
@@ -1565,7 +1559,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(
                               MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm,
                               &reqs[nrecv++]);
                 }
-            } else if (buftype_is_contig) {
+            } else if (buftype_is_contig && recv_count[i] > 0) {
                 /* send/recv to/from self uses memcpy()
                  * buftype_is_contig == 0 is handled at the send time below.
                  */
@@ -1609,7 +1603,10 @@ static void ADIOI_LUSTRE_W_Exchange_data(
                                       contig_access_count, my_aggr_idx, iter,
                                       buftype_extent);
         /* MPI_Issend calls have been posted in ADIOI_Fill_send_buffer. It is
-         * possible nsend is 0. */
+         * possible nsend is 0.
+         * Send buffers must not be touched before MPI_Waitall() is completed,
+         * and thus send_buf will be freed in ADIOI_LUSTRE_Exch_and_write()
+         */
     }
     *nreqs += nsend;
 
@@ -1623,7 +1620,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(
             if (i != myrank) {
                 MPI_Recv(contig_buf, recv_size[i], MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, &status);
                 MEMCPY_UNPACK(i, contig_buf, start_pos, recv_count, write_buf);
-            } else {
+            } else if (recv_count[i] > 0) {
                 /* send/recv to/from self uses memcpy() */
                 char *ptr = (*send_buf)[my_aggr_idx];
                 if (buftype_is_contig)
@@ -1641,13 +1638,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
              * into send_buf[my_aggr_idx]. Now unpack it into write_buf.
              */
             MEMCPY_UNPACK(myrank, (*send_buf)[my_aggr_idx], start_pos, recv_count, write_buf);
-    }
-
-    /* free send_buf[] if allocated */
-    if (*send_buf != NULL) {
-        ADIOI_Free((*send_buf)[0]);
-        ADIOI_Free(*send_buf);
-        *send_buf = NULL;
     }
 }
 
