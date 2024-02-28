@@ -4,6 +4,7 @@
  */
 
 #include "ad_lustre.h"
+#ifndef MIMIC_LUSTRE
 #include <lustre/lustreapi.h>
 
 /* what is the basis for this define?
@@ -58,25 +59,21 @@ static int num_uniq_osts(const char *path)
     free(lum_file);
     return num;
 }
+#endif
 
 void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
 {
     int perm, old_mask, amode, amode_direct, root;
     int lumlen, myrank, flag, set_layout = 0, err;
+#ifndef MIMIC_LUSTRE
     struct lov_user_md *lum = NULL;
+#endif
     char *value;
     ADIO_Offset str_factor = -1, str_unit = 0, start_iodev = -1;
     size_t value_sz = (MPI_MAX_INFO_VAL + 1) * sizeof(char);
     static char myname[] = "ADIOI_LUSTRE_OPEN";
 
     MPI_Comm_rank(fd->comm, &myrank);
-
-if (myrank == 0) {
-    if (fd->access_mode & ADIO_CREATE)
-        printf("%4d: %s line %d - Lustre file create ---- %s\n",myrank,__func__,__LINE__,fd->filename);
-    else
-        printf("%4d: %s line %d - Lustre file open   ---- %s\n",myrank,__func__,__LINE__,fd->filename);
-}
 
     if (fd->perm == ADIO_PERM_NULL) {
         old_mask = umask(022);
@@ -99,10 +96,12 @@ if (myrank == 0) {
 
     amode_direct = amode | O_DIRECT;
 
+#ifndef MIMIC_LUSTRE
     /* odd length here because lov_user_md contains some fixed data and
      * then a list of 'lmm_objects' representing stripe */
     lumlen = sizeof(struct lov_user_md) + MAX_LOV_UUID_COUNT * sizeof(struct lov_user_ost_data);
     lum = (struct lov_user_md *) ADIOI_Calloc(1, lumlen);
+#endif
 
     value = (char *) ADIOI_Malloc(value_sz);
     /* we already validated in LUSTRE_SetInfo that these are going to be the same */
@@ -123,17 +122,39 @@ if (myrank == 0) {
     if ((str_factor > 0) || (str_unit > 0) || (start_iodev >= 0))
         set_layout = 1;
 
+#ifndef MIMIC_LUSTRE
     /* if hints were set, we need to delay creation of any lustre objects.
      * However, if we open the file with O_LOV_DELAY_CREATE and don't call the
      * follow-up ioctl, subsequent writes will fail */
     if (myrank == 0 && set_layout)
         amode = amode | O_LOV_DELAY_CREATE;
+#endif
 
     fd->fd_sys = open(fd->filename, amode, perm);
     if (fd->fd_sys == -1)
         goto fn_exit;
 
     root = (fd->hints->ranklist == NULL) ? 0 : fd->hints->ranklist[0];
+
+#ifdef MIMIC_LUSTRE
+#define xstr(s) str(s)
+#define str(s) #s
+#define STRIPE_SIZE 1024
+#define STRIPE_COUNT 4
+
+        fd->hints->striping_unit = STRIPE_SIZE;
+        ADIOI_Info_set(fd->info, "striping_unit", xstr(STRIPE_SIZE));
+
+        fd->hints->striping_factor = STRIPE_COUNT;
+        ADIOI_Info_set(fd->info, "striping_factor", xstr(STRIPE_COUNT));
+
+        fd->hints->start_iodevice = 0;
+        ADIOI_Info_set(fd->info, "romio_lustre_start_iodevice", "0");
+
+        fd->hints->fs_hints.lustre.num_osts = STRIPE_COUNT;
+        ADIOI_Info_set(fd->info, "lustre_num_osts", xstr(STRIPE_COUNT));
+
+#else
 
     /* we can only set these hints on new files */
     /* It was strange and buggy to open the file in the hint path.  Instead,
@@ -190,6 +211,11 @@ if (myrank == 0) {
             fd->hints->fs_hints.lustre.num_osts = num_uniq_osts(fd->filename);
         }
     }
+#endif
+
+#ifdef WKL_DEBUG
+if ((fd->access_mode & ADIO_CREATE) && myrank == 0) printf("%2d: %s line %3d striping ---- unit=%d factor=%d\n",myrank,__func__,__LINE__,fd->hints->striping_unit,fd->hints->striping_factor);
+#endif
 
     if (fd->access_mode & ADIO_APPEND)
         fd->fp_ind = fd->fp_sys_posn = lseek(fd->fd_sys, 0, SEEK_END);
@@ -213,7 +239,9 @@ if (myrank == 0) {
 
 
   fn_exit:
+#ifndef MIMIC_LUSTRE
     ADIOI_Free(lum);
+#endif
     ADIOI_Free(value);
     /* --BEGIN ERROR HANDLING-- */
     if (fd->fd_sys == -1 || ((fd->fd_direct == -1) && (fd->direct_write || fd->direct_read))) {

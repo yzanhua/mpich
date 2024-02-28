@@ -1020,6 +1020,11 @@ fi
 #
 # Verify presence of lustre/lustre_user.h
 #
+if test "$MIMIC_LUSTRE" = yes ; then
+   AC_DEFINE(ROMIO_LUSTRE, 1, [Define for ROMIO with LUSTRE])
+   AC_DEFINE(MIMIC_LUSTRE, 1, [Define for Hecking ROMIO to mimic LUSTRE])
+   file_system_lustre=
+fi
 lustre_lockahead="no"
 if test -n "$file_system_lustre"; then
     AC_CHECK_HEADERS([linux/lustre/lustre_user.h lustre/lustre_user.h],

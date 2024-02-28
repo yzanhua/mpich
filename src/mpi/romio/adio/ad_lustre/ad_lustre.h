@@ -27,11 +27,13 @@
 
 #include "ad_tuning.h"
 
+#ifndef MIMIC_LUSTRE
 #ifdef HAVE_LUSTRE_LUSTRE_USER_H
 #include <lustre/lustre_user.h>
 #endif
 #ifdef HAVE_LINUX_LUSTRE_LUSTRE_USER_H
 #include <linux/lustre/lustre_user.h>
+#endif
 #endif
 
 
