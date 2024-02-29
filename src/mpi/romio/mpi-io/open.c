@@ -69,6 +69,12 @@ int MPI_File_open(MPI_Comm comm, ROMIO_CONST char *filename, int amode,
 
     ROMIO_THREAD_CS_ENTER();
 
+#ifdef WKL_DEBUG
+// wkl_malloc_reset();
+extern int flat_mem, flat_hits, flat_miss;
+flat_hits= flat_miss =flat_mem=0;
+#endif
+
     /* --BEGIN ERROR HANDLING-- */
     MPIO_CHECK_COMM(comm, myname, error_code);
     MPIO_CHECK_INFO_ALL(info, error_code, comm);

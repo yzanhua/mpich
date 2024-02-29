@@ -90,6 +90,11 @@ void ADIO_Set_view(ADIO_File fd, ADIO_Offset disp, MPI_Datatype etype,
             return;
     }
 
+#ifdef WKL_DEBUG
+MPI_Offset cur, malloc_size;
+wkl_inq_malloc_size(&cur);
+#endif
+
     ADIOI_Type_ispredef(filetype, &is_predef);
     if (is_predef) {
         fd->filetype = filetype;
@@ -109,6 +114,9 @@ void ADIO_Set_view(ADIO_File fd, ADIO_Offset disp, MPI_Datatype etype,
         if (0 == check_type(flat_file, fd->orig_access_mode, myname, "filetype", error_code))
             return;
     }
+#ifdef WKL_DEBUG
+wkl_inq_malloc_size(&malloc_size); printf("%s malloc=%lld\n",__func__,malloc_size-cur);
+#endif
 
     MPI_Type_size_x(fd->etype, &(fd->etype_size));
     fd->disp = disp;

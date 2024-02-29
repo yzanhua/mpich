@@ -43,6 +43,9 @@ static int ADIOI_Flattened_type_delete(MPI_Datatype datatype,
 
 static ADIOI_Flatlist_node *ADIOI_Flatten_datatype(MPI_Datatype datatype);
 
+#ifdef WKL_DEBUG
+int flat_hits, flat_miss;
+#endif
 ADIOI_Flatlist_node *ADIOI_Flatten_and_find(MPI_Datatype datatype)
 {
     ADIOI_Flatlist_node *node;
@@ -57,7 +60,13 @@ ADIOI_Flatlist_node *ADIOI_Flatten_and_find(MPI_Datatype datatype)
     MPI_Type_get_attr(datatype, ADIOI_Flattened_type_keyval, &node, &flag);
     if (flag == 0) {
         node = ADIOI_Flatten_datatype(datatype);
+#ifdef WKL_DEBUG
+flat_miss++;
+#endif
     }
+#ifdef WKL_DEBUG
+else flat_hits++;
+#endif
 
     return node;
 }
@@ -137,6 +146,9 @@ ADIOI_Flatlist_node *ADIOI_Flatten_datatype(MPI_Datatype datatype)
 
 #else
 
+#ifdef WKL_DEBUG
+int flat_mem;
+#endif
 static ADIOI_Flatlist_node *flatlist_node_new(MPI_Datatype datatype, MPI_Count count)
 {
     ADIOI_Flatlist_node *flat;
@@ -152,6 +164,9 @@ static ADIOI_Flatlist_node *flatlist_node_new(MPI_Datatype datatype, MPI_Count c
 
     flat->blocklens = (ADIO_Offset *) ADIOI_Calloc(flat->count * 2, sizeof(ADIO_Offset));
     flat->indices = flat->blocklens + flat->count;
+#ifdef WKL_DEBUG
+flat_mem += sizeof(ADIOI_Flatlist_node) + flat->count * 2 * sizeof(ADIO_Offset);
+#endif
     return flat;
 }
 

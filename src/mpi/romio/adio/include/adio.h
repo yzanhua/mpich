@@ -461,4 +461,12 @@ void MPIO_Completed_request_create(ADIO_File * fd, MPI_Offset nbytes,
 #define MPIR_ERR_FATAL 1
 #define MPIR_ERR_RECOVERABLE 0
 
+#ifdef WKL_DEBUG
+void wkl_inq_malloc_size(MPI_Offset *size);
+void wkl_inq_malloc_max_size(MPI_Offset *size);
+void wkl_malloc_reset(void);
+void wkl_inq_malloc_list(void);
+#endif
+
+
 #endif /* ADIO_H_INCLUDED */
