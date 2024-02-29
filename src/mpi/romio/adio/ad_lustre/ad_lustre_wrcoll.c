@@ -184,6 +184,9 @@ void ADIOI_LUSTRE_Calc_my_req(
         aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
         aggr_ranks[i] = aggr;          /* first aggregator ID of this request */
         avail_lens[i] = avail_len;     /* length covered, may be < len_list[i] */
+#ifdef WKL_DEBUG
+assert(aggr >= 0 && aggr <= cb_nodes);
+#endif
         count_my_req_per_aggr[aggr]++; /* increment for aggregator aggr */
         nelems++;                      /* true No. noncontiguous requests in terms of file domains */
 
@@ -192,6 +195,9 @@ void ADIOI_LUSTRE_Calc_my_req(
          */
         rem_len = len_list[i] - avail_len;
 
+#ifdef WKL_DEBUG
+assert(rem_len >= 0);
+#endif
         while (rem_len > 0) {
             off += avail_len;    /* move forward to first remaining byte */
             avail_len = rem_len; /* save remaining size, pass to calc */
@@ -212,6 +218,12 @@ void ADIOI_LUSTRE_Calc_my_req(
         buf_idx[0] = (ADIO_Offset *) ADIOI_Malloc(nelems * sizeof(ADIO_Offset));
         for (i = 1; i < cb_nodes; i++)
             buf_idx[i] = buf_idx[i - 1] + count_my_req_per_aggr[i - 1];
+
+#ifdef WKL_DEBUG
+int wkl=0; for (i=0; i<cb_nodes; i++) wkl+=count_my_req_per_aggr[i];
+assert(wkl == nelems);
+for (i=0; i<nelems; i++) buf_idx[0][i] = -1;
+#endif
     }
     else
         buf_idx = NULL;
@@ -246,6 +258,9 @@ void ADIOI_LUSTRE_Calc_my_req(
 
         off = offset_list[i];
         aggr = aggr_ranks[i];
+#ifdef WKL_DEBUG
+assert(aggr >= 0 && aggr <= cb_nodes);
+#endif
         avail_len = avail_lens[i];
 
         l = my_req[aggr].count;
@@ -269,6 +284,9 @@ void ADIOI_LUSTRE_Calc_my_req(
             off += avail_len;
             avail_len = rem_len;
             aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
+#ifdef WKL_DEBUG
+assert(aggr >= 0 && aggr <= cb_nodes);
+#endif
             l = my_req[aggr].count;
             ADIOI_Assert(l < count_my_req_per_aggr[aggr]);
             if (buftype_is_contig) {
@@ -354,6 +372,13 @@ void ADIOI_LUSTRE_Calc_others_req(
                  count_others_req_per_proc, 1, MPI_INT, fd->comm);
     ADIOI_Free(count_my_req_per_proc);
 
+#ifdef WKL_DEBUG
+if (!fd->is_agg) {
+    /* non-aggregator should not receive any request */
+    for (i=0; i<nprocs; i++) assert(count_others_req_per_proc[i] == 0);
+}
+#endif
+
     *others_req_ptr = (ADIOI_Access *) ADIOI_Malloc(nprocs * sizeof(ADIOI_Access));
     others_req = *others_req_ptr;
 
@@ -381,6 +406,13 @@ void ADIOI_LUSTRE_Calc_others_req(
     }
     *count_others_req_per_proc_ptr = count_others_req_per_proc;
 
+#ifdef WKL_DEBUG
+if (!fd->is_agg) {
+    /* non-aggregator should not receive any request */
+    for (i=0; i<nprocs; i++) assert(others_req[i].count == 0);
+}
+#endif
+
 /* now send the calculated offsets and lengths to respective processes */
 
     requests = (MPI_Request *)
@@ -392,6 +424,9 @@ void ADIOI_LUSTRE_Calc_others_req(
         if (others_req[i].count == 0)
             continue;
         if (i == myrank) {
+#ifdef WKL_DEBUG
+assert(my_aggr_idx >= 0 && my_aggr_idx <= fd->hints->cb_nodes);
+#endif
             /* send to self uses memcpy(), here
              * others_req[i].count == my_req[my_aggr_idx].count
              */
@@ -402,6 +437,20 @@ void ADIOI_LUSTRE_Calc_others_req(
             MPI_Irecv(others_req[i].offsets, 2 * others_req[i].count,
                       ADIO_OFFSET, i, 0, fd->comm, &requests[j++]);
     }
+#ifdef WKL_DEBUG
+assert(j <= count_others_req_procs);
+int k = j;
+#endif
+
+#ifdef WKL_DEBUG
+/* WRF hangs below when calling MPI_Waitall(), at running 16 nodes, 128 ranks per node
+ * on Perlmutter, when these 3 env variables are set:
+ *    FI_UNIVERSE_SIZE        = 2048
+ *    FI_CXI_DEFAULT_CQ_SIZE  = 524288
+ *    FI_CXI_RX_MATCH_MODE    = software
+ */
+MPI_Barrier(fd->comm); /* This barrier prevents the MPI_Waitall below from hanging !!! */
+#endif
 
     for (i = 0; i < fd->hints->cb_nodes; i++) {
         if (my_req[i].count > 0 && myrank != fd->hints->ranklist[i])
@@ -410,6 +459,9 @@ void ADIOI_LUSTRE_Calc_others_req(
                        ADIO_OFFSET, fd->hints->ranklist[i], 0, fd->comm,
                        &requests[j++]);
     }
+#ifdef WKL_DEBUG
+assert(j-k <= count_my_req_aggr);
+#endif
 
     if (j) {
 #ifdef MPI_STATUSES_IGNORE
@@ -639,6 +691,15 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
                                      myrank, my_aggr_idx,
                                      &count_others_req_procs,
                                      &count_others_req_per_proc, &others_req);
+
+#ifdef WKL_DEBUG
+if (!fd->is_agg) {
+    assert(count_others_req_procs == 0);
+    assert(my_aggr_idx == -1);
+}
+else
+    assert(my_aggr_idx >= 0);
+#endif
 
         /* Two-phase I/O: first communication phase to exchange write data from
          * all processes to the I/O aggregators, followed by the write phase
@@ -1095,6 +1156,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
             if (interleaving_waitall_n_write) {
                 /* non-aggregators wait for all Issend to complete */
                 if (!fd->is_agg) {
+#ifdef WKL_DEBUG
+assert(batch_nreqs <= n_send_recv_ub);
+#endif
                     if (batch_nreqs > 0)
                         MPI_Waitall(batch_nreqs, reqs, MPI_STATUSES_IGNORE);
 
@@ -1115,6 +1179,10 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
             else {
                 /* all processes wait for all isend/irecv to complete */
                 if (batch_nreqs > 0) {
+#ifdef WKL_DEBUG
+assert(batch_nreqs <= n_send_recv_ub);
+// printf("%s: WAITALL ntimes=%d m=%d batch_nreqs=%d\n",__func__,ntimes,m,batch_nreqs);
+#endif
                     MPI_Waitall(batch_nreqs, reqs, MPI_STATUSES_IGNORE);
                     batch_nreqs = 0;
                 }
@@ -1164,6 +1232,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                     MPI_Waitall(nreqs[j], req_ptr, MPI_STATUSES_IGNORE);
                     req_ptr += nreqs[j];
 
+#ifdef WKL_DEBUG
+assert(req_ptr - reqs <= n_send_recv_ub);
+#endif
                     /* free send_buf that may be allocated in
                      * ADIOI_LUSTRE_W_Exchange_data() */
                     if (send_buf[j] != NULL) {
@@ -1270,6 +1341,18 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         ADIOI_Free(this_buf_idx);
     if (send_buf != NULL)
         ADIOI_Free(send_buf);
+
+#ifdef WKL_DEBUG
+/* check any pending messages to be received */
+MPI_Status probe_st;
+int probe_flag;
+MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, fd->comm, &probe_flag, &probe_st);
+if (probe_flag) {
+printf("ERROR ++++ MPI_Iprobe rank=%4d is_agg=%d: ---- cb_nodes=%d ntimes=%d nbufs=%d inter_w_n_w=%d\n",myrank,fd->is_agg,cb_nodes,ntimes,nbufs,interleaving_waitall_n_write);
+fflush(stdout);
+}
+#endif
+
 }
 
 /* This subroutine is copied from ADIOI_Heap_merge(), but modified to coalesce
@@ -1576,6 +1659,9 @@ static void ADIOI_LUSTRE_W_Exchange_data(
         for (i = 0; i < cb_nodes; i++) {
             int dest = fd->hints->ranklist[i];
             if (send_size[i] && i != my_aggr_idx) {
+#ifdef WKL_DEBUG
+ADIOI_Assert(buf_idx[i] != -1);
+#endif
                 MPI_Issend((char *) buf + buf_idx[i], send_size[i],
                            MPI_BYTE, dest, ADIOI_COLL_TAG(dest, iter),
                            fd->comm, &reqs[nsend++]);
@@ -1819,6 +1905,10 @@ done:
 
     if (len_list[ii] == 0) ii++;
     *fileview_indx = ii;
+
+#ifdef WKL_DEBUG
+if (num_memcpy> 0) printf("---- iter=%d contig_access_count=%d ii=%d n_buftypes=%lld fileview_indx=%d flat_buf->count=%d num_memcpy=%d\n",iter,contig_access_count,ii,*n_buftypes,*fileview_indx,flat_buf->count,num_memcpy);
+#endif
 }
 
 /* This function calls ADIOI_OneSidedWriteAggregation iteratively to

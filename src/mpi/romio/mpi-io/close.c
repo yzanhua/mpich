@@ -46,6 +46,12 @@ int MPI_File_close(MPI_File * fh)
 
     adio_fh = MPIO_File_resolve(*fh);
 
+#ifdef WKL_DEBUG
+MPI_Comm tmp_comm;
+char *filename = strdup(adio_fh->filename);
+MPI_Comm_dup((adio_fh)->comm, &tmp_comm);
+#endif
+
     /* --BEGIN ERROR HANDLING-- */
     MPIO_CHECK_FILE_HANDLE(adio_fh, myname, error_code);
     /* --END ERROR HANDLING-- */
@@ -91,6 +97,38 @@ int MPI_File_close(MPI_File * fh)
 
   fn_exit:
     ROMIO_THREAD_CS_EXIT();
+
+#ifdef WKL_DEBUG
+int myrank;
+MPI_Comm_rank(tmp_comm, &myrank);
+MPI_Offset mem_size, max_size, min_size;
+wkl_inq_malloc_max_size(&mem_size);
+MPI_Reduce(&mem_size, &max_size, 1, MPI_OFFSET, MPI_MAX, 0, tmp_comm);
+MPI_Reduce(&mem_size, &min_size, 1, MPI_OFFSET, MPI_MIN, 0, tmp_comm);
+if (myrank == 0) printf("%s: %s malloc high watermark = %lld (max=%.2f min=%.2f MB)\n",__func__,filename,max_size,(float)max_size/1048576.0,(float)min_size/1048576.0);
+wkl_inq_malloc_size(&mem_size);
+if (mem_size > 0) {
+    printf("rank %d: %s file %s mem_size=%lld > 0\n",myrank,__func__,filename,mem_size);
+    wkl_inq_malloc_list();
+}
+/*
+extern int ADIOI_Flattened_type_keyval;
+if (ADIOI_Flattened_type_keyval != MPI_KEYVAL_INVALID)
+    MPI_Type_free_keyval(&ADIOI_Flattened_type_keyval);
+*/
+
+extern int flat_mem, flat_hits, flat_miss;
+int max_flat, min_flat;
+MPI_Reduce(&flat_mem, &max_flat, 1, MPI_INT, MPI_MAX, 0, tmp_comm);
+MPI_Reduce(&flat_mem, &min_flat, 1, MPI_INT, MPI_MIN, 0, tmp_comm);
+if (myrank == 0) {
+    printf("%s: %s flat hits=%d miss=%d malloc=%d (max=%.2f min=%.2f MB)\n",__func__,filename,flat_hits,flat_miss,flat_mem,(float)max_flat/1048576.0,(float)min_flat/1048576.0);
+    fflush(stdout);
+}
+free(filename);
+MPI_Comm_free(&tmp_comm);
+#endif
+
     return error_code;
   fn_fail:
     /* --BEGIN ERROR HANDLING-- */

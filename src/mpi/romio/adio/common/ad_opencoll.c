@@ -448,6 +448,8 @@ static int construct_aggr_list(ADIO_File fd, int root, int *error_code)
 
 // if (fd->hints->cb_nodes == 0) /* hint cb_nodes is not set by user */
 if (fd->hints->cb_nodes == 0 || fd->access_mode & ADIO_RDONLY) {
+/* for now, do not mess up ranklist for read operations */
+// printf("ADIO_RDONLY file %s\n",fd->filename);
                 num_aggr = fd->hints->striping_factor;
 /* for now, do not accept user hint to set ranklist for read operations */
 
@@ -544,6 +546,9 @@ if (fd->hints->cb_nodes == 0 || fd->access_mode & ADIO_RDONLY) {
              * selected as I/O aggregators
              */
 
+#ifdef WKL_DEBUG
+// printf("%d: num_nodes=%d nprocs_per_node[0]=%d num_aggr=%d naggr_per_node[0]=%d\n",rank,num_nodes,nprocs_per_node[0],num_aggr,naggr_per_node[0]);
+#endif
             for (i = 0; i < num_aggr; i++) {
                 int stripe_i = i % striping_factor;
                 j = stripe_i % num_nodes; /* to select from node j */
@@ -556,6 +561,9 @@ if (fd->hints->cb_nodes == 0 || fd->access_mode & ADIO_RDONLY) {
             ADIOI_Free(naggr_per_node);
             ADIOI_Free(idx_per_node);
         }
+#ifdef WKL_DEBUG
+// printf("%d: num_nodes=%d nprocs_per_node[0]=%d num_aggr=%d ranklist=%d %d %d %d (%s)\n",rank,num_nodes,nprocs_per_node[0],num_aggr,fd->hints->ranklist[0],fd->hints->ranklist[1],fd->hints->ranklist[2],fd->hints->ranklist[3],fd->filename); fflush(stdout);
+#endif
 
         /* TODO: we can keep these two arrays in case for dynamic construction
          * of fd->hints->ranklist[], such as in group-cyclic file domain
