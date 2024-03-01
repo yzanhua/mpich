@@ -100,7 +100,7 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
     /* odd length here because lov_user_md contains some fixed data and
      * then a list of 'lmm_objects' representing stripe */
     lumlen = sizeof(struct lov_user_md) + MAX_LOV_UUID_COUNT * sizeof(struct lov_user_ost_data);
-    lov_user_md *lum = (struct lov_user_md *) ADIOI_Calloc(1, lumlen);
+    lum = (struct lov_user_md *) ADIOI_Calloc(1, lumlen);
 #endif
 
     value = (char *) ADIOI_Malloc(value_sz);
@@ -154,7 +154,6 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
         fd->hints->fs_hints.lustre.num_osts = STRIPE_COUNT;
         ADIOI_Info_set(fd->info, "lustre_num_osts", xstr(STRIPE_COUNT));
 
-if ((fd->access_mode & ADIO_CREATE) && myrank == 0) printf("%2d: %s line %3d striping ---- unit=%d factor=%d\n",myrank,__func__,__LINE__,fd->hints->striping_unit,fd->hints->striping_factor);
 #else
 
     /* we can only set these hints on new files */
@@ -209,6 +208,10 @@ if ((fd->access_mode & ADIO_CREATE) && myrank == 0) printf("%2d: %s line %3d str
             fd->hints->fs_hints.lustre.num_osts = num_uniq_osts(fd->filename);
         }
     }
+#endif
+
+#ifdef WKL_DEBUG
+if ((fd->access_mode & ADIO_CREATE) && myrank == 0) printf("%2d: %s line %3d striping ---- unit=%d factor=%d\n",myrank,__func__,__LINE__,fd->hints->striping_unit,fd->hints->striping_factor);
 #endif
 
     if (fd->access_mode & ADIO_APPEND)
