@@ -13,6 +13,7 @@ void ADIO_Close(ADIO_File fd, int *error_code)
 {
     int i, myrank, err;
     double max_two_phase_total = -1.0, max_io_phase_time=-1.0;
+    double max_shuffle_bd_time = -1.0;
     static char myname[] = "ADIO_CLOSE";
 
     if (fd->async_count) {
@@ -25,9 +26,11 @@ void ADIO_Close(ADIO_File fd, int *error_code)
     MPI_Comm_rank(fd->comm, &myrank);
     MPI_Reduce(&fd->two_phase_total_time, &max_two_phase_total, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
     MPI_Reduce(&fd->io_phase_time, &max_io_phase_time, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
+    MPI_Reduce(&fd->shuffle_broad_cast_time, &max_shuffle_bd_time, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
     if (myrank == 0) {
         FPRINTF(stdout, "Total Two-phase time for %s: %f\n", fd->filename, max_two_phase_total);
         FPRINTF(stdout, "Total I/O phase time for %s: %f\n", fd->filename, max_io_phase_time);
+        FPRINTF(stdout, "Determine phase order time for %s: %f\n", fd->filename, max_shuffle_bd_time);
     }
 
     /* because of deferred open, this warants a bit of explaining.  First, if

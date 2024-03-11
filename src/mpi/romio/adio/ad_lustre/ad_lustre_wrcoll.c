@@ -1130,7 +1130,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     myprintf("Total ntimes=%d\n", ntimes);
     phase_orders = (int*) ADIOI_Malloc(cb_nodes * ntimes * sizeof(int));
     agg_send_sizes = (ADIO_Offset*) ADIOI_Malloc(ntimes * sizeof(ADIO_Offset));
+    fd->shuffle_broad_cast_time -= MPI_Wtime();
     determine_phase_order(fd, myrank, nprocs, ntimes, phase_orders);
+    fd->shuffle_broad_cast_time += MPI_Wtime();
 
     for(i = 0; i< cb_nodes; i++){
         myprintf("my_req[%d].count=%d\n", i, my_req[i].count);

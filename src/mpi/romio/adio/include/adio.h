@@ -248,6 +248,7 @@ typedef struct ADIOI_FileD {
     int romio_tunegather;
     double two_phase_total_time;
     double io_phase_time;
+    double shuffle_broad_cast_time;
 } ADIOI_FileD;
 
 typedef struct ADIOI_FileD *ADIO_File;

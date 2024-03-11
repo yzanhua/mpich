@@ -74,6 +74,7 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
     static char myname[] = "ADIOI_LUSTRE_OPEN";
     fd->two_phase_total_time = 0.0;
     fd->io_phase_time = 0.0;
+    fd->shuffle_broad_cast_time = 0.0;
 
     MPI_Comm_rank(fd->comm, &myrank);
 
