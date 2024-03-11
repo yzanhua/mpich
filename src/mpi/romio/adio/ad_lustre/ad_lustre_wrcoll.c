@@ -828,7 +828,7 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
     int start_pos   = 0;
     int phase_shuffle = 0;
     phase_shuffle = fd->hints->fs_hints.lustre.phase_shuffle;
-    printf("phase_shuffle hint: %d\n", phase_shuffle);
+    myprintf("phase_shuffle hint: %d\n", phase_shuffle);
 
     if (phase_shuffle != 1 && phase_shuffle != 2) {
         // default: phase_shuffle = 0; no shuffle
