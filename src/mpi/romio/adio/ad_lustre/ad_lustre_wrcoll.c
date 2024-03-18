@@ -830,8 +830,9 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
     phase_shuffle = fd->hints->fs_hints.lustre.phase_shuffle;
     myprintf("phase_shuffle hint: %d\n", phase_shuffle);
 
-    if (phase_shuffle != 1 && phase_shuffle != 2) {
+    if (phase_shuffle != 1 && phase_shuffle != 2 && phase_shuffle != 3) {
         // default: phase_shuffle = 0; no shuffle
+        // round-robin for each "aggregator"
         for (int i = 0; i < fd->hints->cb_nodes; i++) {
             for (int j = 0; j < num_phases; j++) {
                 phase_orders[i * num_phases + j] = j;
@@ -875,6 +876,20 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
         } else {
             MPI_Allgatherv (send_buf, 0, MPI_INT, phase_orders, recvcounts, displs, MPI_INT,
                             fd->comm);
+        }
+    } else if (phase_shuffle == 3) {
+        // round-robin for each "phase"
+        int start_phase = 0;
+        int current_phase = 0;
+        for (int j = 0; j < num_phases; j++) {
+            for (int i = 0; i < fd->hints->cb_nodes; i++) {
+                phase_orders[i * num_phases + j] = current_phase;
+                current_phase = (current_phase + 1) % num_phases;
+            }
+            if (current_phase == start_phase) {
+                start_phase = (start_phase + 1) % num_phases;
+                current_phase = start_phase;
+            }
         }
     }
 
