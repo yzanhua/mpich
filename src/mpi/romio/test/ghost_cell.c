@@ -1,14 +1,13 @@
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * *
  *
- * Copyright (C) by Northwestern University
+ * Copyright (C) 2023, by Northwestern University
  *
  * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 /*
- * This example writes a 2D array buffer with ghost cells to a variables. The
- * size of ghost cells is nghosts and the ghost cells cells appear on both ends
- * of each dimension. The contents of ghost cells are -8 and non-ghost cells
- * are the process rank IDs.
+ * This example writes a 2D array buffer with ghost cells surrounding
+ * variables. The size of ghost cells is 'nghosts'. The contents of ghost
+ * cells are '-8' and non-ghost cells are the process rank IDs.
  *
  * To compile:
  *        mpicc -O2 ghost_cell.c -o ghost_cell
@@ -17,7 +16,6 @@
  * num is the size of ghost cells on both ends of each dimension,
  * len is the size of local array, which is len x len.
  *
- * When using #define EXPECT(rank,x) (rank)
  * data contents in the output file
  *         0, 0, 0, 0, 0, 1, 1, 1, 1, 1,
  *         0, 0, 0, 0, 0, 1, 1, 1, 1, 1,
@@ -28,7 +26,7 @@
  *         2, 2, 2, 2, 2, 3, 3, 3, 3, 3,
  *         2, 2, 2, 2, 2, 3, 3, 3, 3, 3 ;
  *
- * the contents of local buffers are shown below.
+ * The contents of local buffers are shown below, when running 4 processes.
  *
  * rank 0:                                rank 1:
  *    -8, -8, -8, -8, -8, -8, -8, -8, -8     -8, -8, -8, -8, -8, -8, -8, -8, -8
@@ -58,12 +56,12 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <assert.h>
+#include <errno.h>
 
 #include <mpi.h>
 
 static int verbose;
-
-#define EXPECT(rank,x) (rank)
 
 #define ERR \
     if (err != MPI_SUCCESS) { \
@@ -94,9 +92,12 @@ int main(int argc, char **argv)
     extern int optind;
     extern char *optarg;
     char filename[256];
-    int i, j, k, x, rank, nprocs, mode, len, bufsize, ntimes, err, nerrs=0;
+    size_t i, j, k, bufsize;
+    ssize_t wlen, rlen;
+    int x, rank, nprocs, mode, len, ntimes, err, nerrs=0;
     int psizes[2], gsizes[2], subsizes[2], *gstarts=NULL, starts[2], nghosts;
     int fd, sizes[2], local_rank[2], *buf=NULL, *buf_ptr, type_size;
+    double timing, max_timing;
 
     MPI_Aint lb, extent;
     MPI_File fh;
@@ -198,8 +199,31 @@ int main(int argc, char **argv)
 
     MPI_Type_size(buf_type, &type_size);
     MPI_Type_get_extent(buf_type, &lb, &extent);
-    if (verbose && rank == 0)
+    if (verbose && rank == 0) {
         printf(" buf_type size=%d lb=%ld extent=%ld\n",type_size,lb,extent);
+        printf("file name = %s\n",filename);
+    }
+
+    if (rank == 0) { /* root process write the entire file with values -1 */
+        bufsize = gsizes[1];
+        buf = (int *) malloc(bufsize * sizeof(int));
+        for (i=0; i<bufsize; i++) buf[i] = -1;
+        fd = open(filename, O_CREAT | O_WRONLY, S_IRUSR|S_IWUSR);
+        if (fd < 0) {
+            printf("Error at line %d : opening file %s (%s)\n", __LINE__, filename, strerror(errno));
+            MPI_Abort(MPI_COMM_WORLD, -1);
+            exit(1);
+        }
+        lseek(fd, off, SEEK_SET);
+        for (i=0; i<ntimes * gsizes[0]; i++) {
+            wlen = write(fd, buf, bufsize * sizeof(int));
+            if (wlen != bufsize * sizeof(int))
+                printf("Writing %lld but only %zd returned\n", bufsize * sizeof(int), wlen);
+            assert(wlen == bufsize * sizeof(int));
+        }
+        close(fd);
+        free(buf);
+    }
 
     /* initialize buffer with ghost cells on both ends of each dim */
     bufsize = (len + 2 * nghosts) * (len + 2 * nghosts);
@@ -211,7 +235,7 @@ int main(int argc, char **argv)
         for (j=0; j<len+2*nghosts; j++) {
             if (nghosts <= i && i < len+nghosts &&
                 nghosts <= j && j < len+nghosts)
-                buf_ptr[i*(len+2*nghosts) + j] = EXPECT(rank, x);
+                buf_ptr[i*(len+2*nghosts) + j] = rank;
             else
                 /* set all ghost cells value to -8 */
                 buf_ptr[i*(len+2*nghosts) + j] = -8;
@@ -220,7 +244,7 @@ int main(int argc, char **argv)
     }
 
     /* create the file */
-    mode = MPI_MODE_CREATE | MPI_MODE_WRONLY;
+    mode = MPI_MODE_WRONLY;
     err = MPI_File_open(MPI_COMM_WORLD, filename, mode, info, &fh);
     ERR
 
@@ -229,8 +253,11 @@ int main(int argc, char **argv)
     ERR
 
     /* write to the file */
+    MPI_Barrier(MPI_COMM_WORLD);
+    timing = MPI_Wtime();
     err = MPI_File_write_all(fh, buf, ntimes, buf_type, &status);
     ERR
+    timing = MPI_Wtime() - timing;
 
     MPI_File_close(&fh);
 
@@ -242,52 +269,47 @@ int main(int argc, char **argv)
     if (rank) goto err_out;
 
     /* root process reads the entire file and checks contents */
-    free(buf);
-    bufsize = gsizes[0] * gsizes[1];
-    buf = (int *) malloc(bufsize * ntimes * sizeof(int));
-
-    fd = open(filename, O_RDONLY, 0400);
-    lseek(fd, off, SEEK_SET);
-    read(fd, buf, bufsize * ntimes * sizeof(int));
-    close(fd);
-
-    /* print the entire array */
-    if (verbose) {
-        for (k=0; k<ntimes; k++) {
-            printf("k = %d\n",k);
-            for (i=0; i<gsizes[0]; i++) {
-                for (j=0; j<gsizes[1]; j++)
-                    printf(" %d",buf[k*bufsize+gsizes[1]*i+j]);
-                printf("\n");
-            }
-            printf("\n");
-        }
+    fd = open(filename, O_RDONLY, S_IRUSR);
+    if (fd < 0) {
+        printf("Error at line %d : opening file %s (%s)\n", __LINE__, filename, strerror(errno));
+        MPI_Abort(MPI_COMM_WORLD, -1);
+        exit(1);
     }
+    free(buf);
+    buf = (int *) malloc(sizeof(int) * len);
 
     /* check if the contents are expected */
     for (k=0; k<ntimes; k++) {
         int p;
         for (p=0; p<nprocs; p++) {
-            int local_indx = gsizes[0] * gsizes[1] * k;
+            size_t local_indx = gsizes[0] * gsizes[1] * k;
             local_indx += gstarts[p*2] * gsizes[1] + gstarts[p*2+1];
 
             x = 0;
             for (i=0; i<len; i++, local_indx += gsizes[1]) {
+                lseek(fd, off+local_indx*sizeof(int), SEEK_SET);
+                rlen = read(fd, buf, sizeof(int) * len);
+                assert(rlen == sizeof(int) * len);
                 for (j=0; j<len; j++) {
-                    if (buf[local_indx + j] != EXPECT(p, x)) {
-                        printf("Error: Unexpected value %d at k=%d p=%d i=%d j=%d\n",
-                                buf[local_indx + j],k,p,i,j);
+                    if (buf[j] != p) {
+                        printf("Error: k=%d p=%d expecting buf[%d][%d]=%d but got %d\n",
+                                k,p,i,j,p, buf[j]);
                         nerrs++;
-                        goto err_out;
+                        if (nerrs>10) goto err_out;
                     }
                 }
             }
         }
     }
+    close(fd);
 
 err_out:
     free(buf);
     if (gstarts != NULL) free(gstarts);
+
+    MPI_Reduce(&timing, &max_timing, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    if (verbose && rank == 0)
+        printf("Time of collective write = %.2f sec\n", max_timing);
 
     MPI_Finalize();
     return (nerrs > 0);
