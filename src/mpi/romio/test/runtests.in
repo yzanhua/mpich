@@ -441,6 +441,13 @@ echo '**** Testing check_type_contig ****'
 $mpirun -np 1 ${valgrind_opt} ./check_type_contig -q
 CleanExe check_type_contig
 #
+OutTime
+MakeExe buf_noncontig
+\rm -f buf_noncontig.out
+echo '**** Testing buf_noncontig ****'
+$mpirun -np 1 ${valgrind_opt} ./buf_noncontig -q
+CleanExe buf_noncontig
+#
 
 #
 if [ @NOF77@ = 0 ] ; then
