@@ -1825,8 +1825,8 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
 int num_memcpy = 0;
 
     /* contig_access_count: the number of contiguous file segments this
-     *     rank writes to. Each segment i is described by offset_list[i] and
-     *     len_list[i].
+     *     rank writes to. Each segment ii is described by offset_list[ii] and
+     *     len_list[ii].
      * fileview_indx: the index to the offset_list[], len_list[] that have been
      *     processed in the previous round.
      * For each contiguous off-len pair in this rank's file view, pack write
