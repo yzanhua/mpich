@@ -5,6 +5,8 @@
 
 #include "ad_lustre.h"
 #include "adio_extern.h"
+#include <stdio.h>
+#include <string.h>
 
 
 #ifdef HAVE_LUSTRE_LOCKAHEAD
@@ -54,6 +56,24 @@ typedef struct {
     ADIO_Offset *off; /* list of write offsets by this rank in round m */
 } off_len_list;
 
+typedef struct {
+    double total_two_phase_time;
+    double io_time;
+    double comm_time;
+    int rounds;
+    int num_message_per_agg;
+    int* num_message_per_round_per_agg;
+    int* num_receiver_per_round;
+    size_t* send_size_per_round;
+    int* num_sender_processes_per_round_per_agg;
+    int* num_sender_nodes_per_round_per_agg;
+    int num_wait_all_group;
+    int* num_wait_all_per_group;
+    int use_ind_io;
+    int use_one_side_io;
+    int cb_nodes;
+    int num_procs_per_node;
+} Statistic;
 
 /* prototypes of functions used for collective writes only. */
 static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
@@ -68,7 +88,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                         int contig_access_count,
                                         int my_aggr_idx,
                                         ADIO_Offset **buf_idx,
-                                        int *error_code);
+                                        int *error_code,
+                                        Statistic *stat);
 static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, const void *buf,
                                           int *n_buftypes,
                                           int *flat_buf_idx,
@@ -490,6 +511,132 @@ assert(j-k <= count_my_req_aggr);
 #endif
 }
 
+static void post_process_statistics(Statistic* stat_ptr, MPI_Comm comm, int myrank, int nprocs, char* filename, int is_agg) {
+    // print time
+    // double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
+    stat_ptr->comm_time = stat_ptr->total_two_phase_time - stat_ptr->io_time;
+
+    size_t struct_size = sizeof(double) * 3 + sizeof(int) * 3;
+    struct_size += stat_ptr->rounds * sizeof(int) * 5;
+    struct_size += stat_ptr->rounds * sizeof(size_t);
+
+    char* send_buf = (char*) malloc(struct_size);
+    ((double*) send_buf)[0] = stat_ptr->total_two_phase_time;
+    ((double*) send_buf)[1] = stat_ptr->io_time;
+    ((double*) send_buf)[2] = stat_ptr->comm_time;
+    int* int_buf = (int*)((double*) send_buf + 3);
+    int_buf[0] = stat_ptr->num_message_per_agg;
+    int_buf[1] = stat_ptr->num_wait_all_group;
+    int_buf[2] = is_agg;
+    int* array_buf1 = (int*)(int_buf + 3);
+    int* array_buf2 = array_buf1 + stat_ptr->rounds;
+    int* array_buf3 = array_buf2 + stat_ptr->rounds;
+    int* array_buf4 = array_buf3 + stat_ptr->rounds;
+    int* array_buf5 = array_buf4 + stat_ptr->rounds;
+    if (is_agg){
+        memcpy(array_buf1, stat_ptr->num_message_per_round_per_agg, stat_ptr->rounds * sizeof(int));
+        memcpy(array_buf3, stat_ptr->num_sender_processes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
+        memcpy(array_buf4, stat_ptr->num_sender_nodes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
+    }
+    memcpy(array_buf2, stat_ptr->num_receiver_per_round, stat_ptr->rounds * sizeof(int));
+    memcpy(array_buf5, stat_ptr->num_wait_all_per_group, stat_ptr->rounds * sizeof(int));
+
+    size_t* array_buf6 = (size_t*)(array_buf5 + stat_ptr->rounds);
+    memcpy(array_buf6, stat_ptr->send_size_per_round, stat_ptr->rounds * sizeof(size_t));
+
+    char* recv_buf = NULL;
+    if (myrank==0) recv_buf = (char*) malloc(struct_size * nprocs);
+    MPI_Gather(send_buf, struct_size, MPI_BYTE, recv_buf, struct_size, MPI_BYTE, 0, comm);
+
+    if (myrank == 0) {
+        printf("============== %s\n", filename);
+        printf("rounds: %d\n", stat_ptr->rounds);
+        printf("use_ind_io: %d\n", stat_ptr->use_ind_io);
+        printf("use_one_side_io: %d\n", stat_ptr->use_one_side_io);
+        printf("cb_nodes: %d\n", stat_ptr->cb_nodes);
+        printf("num_procs_per_node: %d\n", stat_ptr->num_procs_per_node);
+        printf("struct size (MB): %f\n",( (double) struct_size) / 1048576.0);
+
+        double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
+        for (int i = 0; i < nprocs; i++) {
+            double* recv_ptr = (double*)(recv_buf + i * struct_size);
+            if (recv_ptr[0] > max_two_phase_total) max_two_phase_total = recv_ptr[0];
+            if (recv_ptr[1] > max_io_phase_time) max_io_phase_time = recv_ptr[1];
+            if (recv_ptr[2] > max_comm_phase_time) max_comm_phase_time = recv_ptr[2];
+        }
+        printf("max_two_phase_total: %f\n", max_two_phase_total);
+        printf("max_io_phase_time: %f\n", max_io_phase_time);
+        printf("max_comm_phase_time: %f\n", max_comm_phase_time);
+
+        for (int i = 0; i < nprocs; i++) {
+            double* recv_ptr = (double*)(recv_buf + i * struct_size);
+            int* int_recv_ptr = (int*)(recv_ptr + 3);
+            int* array_recv_ptr1 = int_recv_ptr + 3;
+            int* array_recv_ptr2 = array_recv_ptr1 + stat_ptr->rounds;
+            int* array_recv_ptr3 = array_recv_ptr2 + stat_ptr->rounds;
+            int* array_recv_ptr4 = array_recv_ptr3 + stat_ptr->rounds;
+            int* array_recv_ptr5 = array_recv_ptr4 + stat_ptr->rounds;
+            size_t* array_recv_ptr6 = (size_t*)(array_recv_ptr5 + stat_ptr->rounds);
+            printf("-- proc %d\n", i);
+            printf("\ttotal_two_phase_time: %f\n", recv_ptr[0]);
+            printf("\tio_time: %f\n", recv_ptr[1]);
+            printf("\tcomm_time: %f\n", recv_ptr[2]);
+            printf("\tnum_message_per_agg: %d\n", int_recv_ptr[0]);
+            printf("\tnum_wait_all_group: %d\n", int_recv_ptr[1]);
+            printf("\tis_agg: %d\n", int_recv_ptr[2]);
+            if (int_recv_ptr[2]) {
+                printf("\tnum_message_per_round_per_agg: ");
+                for (int j = 0; j < stat_ptr->rounds; j++) {
+                    printf("%d ", array_recv_ptr1[j]);
+                }
+                printf("\n");
+                printf("\tnum_sender_processes_per_round_per_agg: ");
+                for (int j = 0; j < stat_ptr->rounds; j++) {
+                    printf("%d ", array_recv_ptr3[j]);
+                }
+                printf("\n");
+                printf("\tnum_sender_nodes_per_round_per_agg: ");
+                for (int j = 0; j < stat_ptr->rounds; j++) {
+                    printf("%d ", array_recv_ptr4[j]);
+                }
+                printf("\n");
+            }
+            printf("\tnum_receiver_per_round: ");
+            for (int j = 0; j < stat_ptr->rounds; j++) {
+                printf("%d ", array_recv_ptr2[j]);
+            }
+            printf("\n");
+            printf("\tsend_size_per_round: ");
+            for (int j = 0; j < stat_ptr->rounds; j++) {
+                printf("%zu ", array_recv_ptr6[j]);
+            }
+            printf("\n");
+        }
+    }
+
+    // free mem
+    if (send_buf != NULL) free(send_buf);
+    if (recv_buf != NULL) free(recv_buf);
+    if (stat_ptr->num_message_per_round_per_agg != NULL) {
+        ADIOI_Free(stat_ptr->num_message_per_round_per_agg);
+    }
+    if (stat_ptr->num_receiver_per_round != NULL) {
+        ADIOI_Free(stat_ptr->num_receiver_per_round);
+    }
+    if (stat_ptr->send_size_per_round != NULL) {
+        ADIOI_Free(stat_ptr->send_size_per_round);
+    }
+    if (stat_ptr->num_sender_processes_per_round_per_agg != NULL) {
+        ADIOI_Free(stat_ptr->num_sender_processes_per_round_per_agg);
+    }
+    if (stat_ptr->num_sender_nodes_per_round_per_agg != NULL) {
+        ADIOI_Free(stat_ptr->num_sender_nodes_per_round_per_agg);
+    }
+    if (stat_ptr->num_wait_all_per_group != NULL) {
+        ADIOI_Free(stat_ptr->num_wait_all_per_group);
+    }
+}
+
 void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count,
                                    MPI_Datatype datatype,
                                    int file_ptr_type, ADIO_Offset offset,
@@ -513,6 +660,25 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
 
     orig_fp = fd->fp_ind;
 
+    // init stat to 0;
+    Statistic stat = {.total_two_phase_time                   = 0.0,
+                      .io_time                                = 0.0,
+                      .rounds                                 = 0,
+                      .num_message_per_agg                    = 0,
+                      .num_message_per_round_per_agg          = NULL,
+                      .num_receiver_per_round                 = NULL,
+                      .send_size_per_round                    = NULL,
+                      .num_sender_processes_per_round_per_agg = NULL,
+                      .num_sender_nodes_per_round_per_agg     = NULL,
+                      .num_wait_all_group                     = 0,
+                      .num_wait_all_per_group                 = NULL,
+                      .use_ind_io                             = 0,
+                      .use_one_side_io                        = 0,
+                      .cb_nodes                               = fd->hints->cb_nodes,
+                      .num_procs_per_node                     = 128};
+    char* p = getenv ("ROMIO_NUM_PROCS_PER_NODE");
+    if (p != NULL) { stat.num_procs_per_node = atoi(p); }
+    stat.total_two_phase_time = -MPI_Wtime();
     /* Check if collective write is actually necessary, if cb_write hint isn't
      * disabled by users.
      */
@@ -613,6 +779,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
         } else {
             ADIO_WriteStrided(fd, buf, count, datatype, file_ptr_type, offset, status, error_code);
         }
+        stat.use_ind_io = 1;
         return;
     }
 
@@ -628,6 +795,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
         striping_info[0] = fd->hints->striping_unit;
         striping_info[1] = fd->hints->striping_factor;
         striping_info[2] = fd->hints->cb_nodes;
+        stat.use_one_side_io = 1;
 
         ADIOI_LUSTRE_IterateOneSided(fd, buf, striping_info, offset_list, len_list,
                                      contig_access_count, nonzero_nprocs, count,
@@ -708,7 +876,7 @@ else
         ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, others_req, my_req,
                                     offset_list, len_list, min_st_loc,
                                     max_end_loc, contig_access_count,
-                                    my_aggr_idx, buf_idx, error_code);
+                                    my_aggr_idx, buf_idx, error_code, &stat);
 
         /* free all memory allocated */
         ADIOI_Free_others_req(nprocs, count_others_req_per_proc, others_req);
@@ -721,6 +889,8 @@ else
         ADIOI_Free(my_req[0].offsets);
         ADIOI_Free(my_req);
     }
+    stat.total_two_phase_time += MPI_Wtime();
+    post_process_statistics(&stat, fd->comm, myrank, nprocs, fd->filename, fd->is_agg);
     ADIOI_Free(offset_list);
 
     /* If this collective write is followed by an independent write, it's
@@ -786,7 +956,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                         int contig_access_count,
                                         int my_aggr_idx,
                                         ADIO_Offset **buf_idx,
-                                        int *error_code)
+                                        int *error_code,
+                                        Statistic *stat_ptr)
 {
     /* Each process sends all its write requests to I/O aggregators based on
      * the file domain assignment to the aggregators. In this implementation,
@@ -844,6 +1015,16 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     ntimes = (max_end_loc - min_st_loc + 1) / step_size;
     if ((max_end_loc - min_st_loc + 1) % step_size)
         ntimes++;
+    stat_ptr->rounds = ntimes;
+    if (fd->is_agg) {
+        // ADIOI_Calloc((nprocs + 2 * cb_nodes), sizeof(int));
+        stat_ptr->num_message_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
+        stat_ptr->num_sender_processes_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
+        stat_ptr->num_sender_nodes_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
+    }
+    stat_ptr->num_receiver_per_round = (int *) ADIOI_Calloc(ntimes, sizeof(int));
+    stat_ptr->send_size_per_round = (size_t *) ADIOI_Calloc(ntimes, sizeof(size_t));
+    stat_ptr->num_wait_all_per_group = (int *) ADIOI_Calloc(ntimes, sizeof(int));
 
     /* off_list[m] is the starting file offset of this process's write region
      * in iteration m (file domain of iteration m). This offset may not be
@@ -1057,8 +1238,14 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                         break;
                 }
                 send_curr_offlen_ptr[i] = j;
+                stat_ptr->num_receiver_per_round[m]++;
+                stat_ptr->send_size_per_round[m] += send_size[i];
             }
         }
+
+        // aggregators / receivers
+        int process_recorded = -1;
+        int nodes_recorded = -1;
         for (i = 0; i < nprocs; i++) {
             if (others_req[i].count) {
                 recv_start_pos[ibuf][i] = recv_curr_offlen_ptr[i];
@@ -1068,6 +1255,17 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                         others_req[i].mem_ptrs[j] =
                             (MPI_Aint) (others_req[i].offsets[j] - real_off);
                         recv_size[ibuf][i] += others_req[i].lens[j];
+                        stat_ptr->num_message_per_agg++;
+                        stat_ptr->num_message_per_round_per_agg[m]++;
+                        if (i > process_recorded) {
+                            process_recorded = i;
+                            stat_ptr->num_sender_processes_per_round_per_agg[m]++;
+                        }
+                        int node_id = i / stat_ptr->num_procs_per_node;
+                        if (node_id > nodes_recorded) {
+                            nodes_recorded = node_id;
+                            stat_ptr->num_sender_nodes_per_round_per_agg[m]++;
+                        }
                     } else {
                         break;
                     }
@@ -1140,6 +1338,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
 
         /* commit writes for this batch of numBufs */
         if (m % nbufs == nbufs - 1 || m == ntimes - 1 || write_now) {
+            stat_ptr->num_wait_all_per_group[stat_ptr->num_wait_all_group] = batch_nreqs;
+            stat_ptr->num_wait_all_group++;
+
             MPI_Request *req_ptr;
             int numBufs = ibuf + 1;
 
@@ -1296,7 +1497,7 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                      */
                     ADIOI_Assert(srt_off_len[j].off[i] < real_off + real_size &&
                                  srt_off_len[j].off[i] >= real_off);
-
+                    stat_ptr->io_time -= MPI_Wtime();
                     ADIO_WriteContig(fd,
                                      write_buf[j] + (srt_off_len[j].off[i] - real_off),
                                      srt_off_len[j].len[i],
@@ -1304,6 +1505,7 @@ assert(req_ptr - reqs <= n_send_recv_ub);
                                      ADIO_EXPLICIT_OFFSET,
                                      srt_off_len[j].off[i],
                                      &status, error_code);
+                    stat_ptr->io_time += MPI_Wtime();
                     if (*error_code != MPI_SUCCESS)
                         goto over;
                 }
