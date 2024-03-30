@@ -537,8 +537,8 @@ static void print_across_proc(
     printf("%s", tab_str);
 
     // printf("\t\tnum_wait_all_per_group (non agg): ");
-    int prev_min_int = 1, prev_max_int = 0, prev_avg_int = 0;
-    size_t prev_min_size = 1, prev_max_size = 0, prev_avg_size = 0;
+    int prev_min_int = 1, prev_max_int = 0, prev_avg_int = 0, prev_total_int = 0;
+    size_t prev_min_size = 1, prev_max_size = 0, prev_avg_size = 0, prev_total_size = 0;
     int same_cnt = 0;
     for (int j = 0; j < j_end; j++) {
         int min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
@@ -568,7 +568,7 @@ static void print_across_proc(
             } else {
                 if (same_cnt > 0) {
                     if (prev_min_size != prev_max_size)
-                        printf ("%zu/%zu/%.2fX%d ", prev_min_size, prev_max_size, (double) prev_avg_size / 100.0, same_cnt);
+                        printf ("%zu/%zu/%zu/%.2fX%d ", prev_min_size, prev_max_size,total_val_size, (double) prev_avg_size / 100.0, same_cnt);
                         // printf ("%zu/%zu/%zuX%d ", prev_min_size, prev_max_size, prev_avg_size, same_cnt);
                     else
                         printf ("%zu//X%d ", prev_min_size, same_cnt);
@@ -577,6 +577,7 @@ static void print_across_proc(
                 prev_min_size = min_val_size;
                 prev_max_size = max_val_size;
                 prev_avg_size = curr_avg_size;
+                prev_total_size = total_val_size;
             }
         } else {
             int curr_avg_int = (int)((double) total_val_int / cnt *100.0);
@@ -585,7 +586,7 @@ static void print_across_proc(
             } else {
                 if (same_cnt > 0) {
                     if (prev_min_int != prev_max_int)
-                        printf ("%d/%d/%.2fX%d ", prev_min_int, prev_max_int, (double) prev_avg_int / 100.0, same_cnt);
+                        printf ("%d/%d/%d/%.2fX%d ", prev_min_int, prev_max_int, total_val_int, (double) prev_avg_int / 100.0, same_cnt);
                     else
                         printf ("%d//X%d ", prev_min_int, same_cnt);
                 }
@@ -593,19 +594,20 @@ static void print_across_proc(
                 prev_min_int = min_val_int;
                 prev_max_int = max_val_int;
                 prev_avg_int = curr_avg_int;
+                prev_total_int = total_val_int;
             }
         }
     }
     if (is_int == 0 && same_cnt > 0) {
         if (prev_min_size != prev_max_size)
-            printf ("%zu/%zu/%.2fX%d ", prev_min_size, prev_max_size, (double)prev_avg_size / 100.0, same_cnt);
+            printf ("%zu/%zu/%zu/%.2fX%d ", prev_min_size, prev_max_size, prev_total_size, (double)prev_avg_size / 100.0, same_cnt);
         else
-            printf ("%zu/%zu/%zuX%d ", prev_min_size, prev_min_size, prev_min_size, same_cnt);
+            printf ("%zu//X%d ", prev_min_size, same_cnt);
     } else if (is_int == 1 && same_cnt > 0) {
         if (prev_min_int != prev_max_int)
-            printf ("%d/%d/%.2fX%d ", prev_min_int, prev_max_int, (double)prev_avg_int / 100.0, same_cnt);
+            printf ("%d/%d/%d/%.2fX%d ", prev_min_int, prev_max_int, prev_total_int, (double)prev_avg_int / 100.0, same_cnt);
         else
-            printf ("%d/%d/%dX%d ", prev_min_int, prev_min_int, prev_min_int, same_cnt);
+            printf ("%d//X%d ", prev_min_int, same_cnt);
     }
     printf ("\n");
 }
@@ -743,7 +745,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             }
         }
         if (min_val_int != max_val_int) {
-            printf("\tnum_message_per_agg: %d/%d/%.2f\n", min_val_int, max_val_int, (double) total_val_int / cnt);
+            printf("\tnum_message_per_agg: %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
         } else {
             printf("\tnum_message_per_agg: %d//\n", min_val_int);
         }
@@ -761,7 +763,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             }
         }
         if (min_val_int != max_val_int) {
-            printf("\tnum_wait_all_group (agg): %d/%d/%.2f\n", min_val_int, max_val_int, (double) total_val_int / cnt);
+            printf("\tnum_wait_all_group (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
         } else {
             printf("\tnum_wait_all_group (agg): %d//\n", min_val_int);
         }
@@ -785,7 +787,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             }
         }
         if (min_val_int != max_val_int) {
-            printf("\tnum_wait_all_group (non agg): %d/%d/%.2f\n", min_val_int, max_val_int, (double) total_val_int / cnt);
+            printf("\tnum_wait_all_group (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
         } else {
             printf("\tnum_wait_all_group (non agg): %d//\n", min_val_int);
         }
