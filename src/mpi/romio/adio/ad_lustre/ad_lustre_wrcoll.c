@@ -5,6 +5,7 @@
 
 #include "ad_lustre.h"
 #include "adio_extern.h"
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -71,7 +72,6 @@ typedef struct {
     int* num_wait_all_per_group;
     int use_ind_io;
     int use_one_side_io;
-    int cb_nodes;
     int num_procs_per_node;
 } Statistic;
 
@@ -511,7 +511,7 @@ assert(j-k <= count_my_req_aggr);
 #endif
 }
 
-static void post_process_statistics(Statistic* stat_ptr, MPI_Comm comm, int myrank, int nprocs, char* filename, int is_agg) {
+static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs, ADIO_File fd) {
     // print time
     // double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
     stat_ptr->comm_time = stat_ptr->total_two_phase_time - stat_ptr->io_time;
@@ -527,13 +527,13 @@ static void post_process_statistics(Statistic* stat_ptr, MPI_Comm comm, int myra
     int* int_buf = (int*)((double*) send_buf + 3);
     int_buf[0] = stat_ptr->num_message_per_agg;
     int_buf[1] = stat_ptr->num_wait_all_group;
-    int_buf[2] = is_agg;
+    int_buf[2] = fd->is_agg;
     int* array_buf1 = (int*)(int_buf + 3);
     int* array_buf2 = array_buf1 + stat_ptr->rounds;
     int* array_buf3 = array_buf2 + stat_ptr->rounds;
     int* array_buf4 = array_buf3 + stat_ptr->rounds;
     int* array_buf5 = array_buf4 + stat_ptr->rounds;
-    if (is_agg){
+    if (fd->is_agg){
         memcpy(array_buf1, stat_ptr->num_message_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf3, stat_ptr->num_sender_processes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf4, stat_ptr->num_sender_nodes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
@@ -546,31 +546,260 @@ static void post_process_statistics(Statistic* stat_ptr, MPI_Comm comm, int myra
 
     char* recv_buf = NULL;
     if (myrank==0) recv_buf = (char*) malloc(struct_size * nprocs);
-    MPI_Gather(send_buf, struct_size, MPI_BYTE, recv_buf, struct_size, MPI_BYTE, 0, comm);
+    MPI_Gather(send_buf, struct_size, MPI_BYTE, recv_buf, struct_size, MPI_BYTE, 0, fd->comm);
 
     if (myrank == 0) {
-        printf("============== %s\n", filename);
-        printf("rounds: %d\n", stat_ptr->rounds);
-        printf("use_ind_io: %d\n", stat_ptr->use_ind_io);
-        printf("use_one_side_io: %d\n", stat_ptr->use_one_side_io);
-        printf("cb_nodes: %d\n", stat_ptr->cb_nodes);
-        printf("num_procs_per_node: %d\n", stat_ptr->num_procs_per_node);
-        printf("struct size (MB): %f\n",( (double) struct_size) / 1048576.0);
-
-        double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
-        for (int i = 0; i < nprocs; i++) {
-            double* recv_ptr = (double*)(recv_buf + i * struct_size);
-            if (recv_ptr[0] > max_two_phase_total) max_two_phase_total = recv_ptr[0];
-            if (recv_ptr[1] > max_io_phase_time) max_io_phase_time = recv_ptr[1];
-            if (recv_ptr[2] > max_comm_phase_time) max_comm_phase_time = recv_ptr[2];
-        }
-        printf("max_two_phase_total: %f\n", max_two_phase_total);
-        printf("max_io_phase_time: %f\n", max_io_phase_time);
-        printf("max_comm_phase_time: %f\n", max_comm_phase_time);
-
+        printf("============== %s\nbasic\n", fd->filename);
+        printf("\trounds: %d\n", stat_ptr->rounds);
+        printf("\tuse_ind_io: %d\n", stat_ptr->use_ind_io);
+        printf("\tuse_one_side_io: %d\n", stat_ptr->use_one_side_io);
+        printf("\tnum_procs_per_node: %d\n", stat_ptr->num_procs_per_node);
+        printf("\tstruct size (MB): %f\n",( (double) struct_size) / 1048576.0);
+        printf("\tstruct size total (MB): %f\n",( (double) struct_size * nprocs) / 1048576.0);
+        printf("\tcb_nodes: %d\n", fd->hints->cb_nodes);
+        printf("\tcb_buffer_size: %d\n", fd->hints->cb_buffer_size);
+        printf("\tstripe size: %d\n", fd->hints->striping_unit);
+        printf("\tstripe count: %d\n", fd->hints->striping_factor);
+        double max_two_phase_total = -1.0, max_io_phase_time=-1.0;
+        double max_comm_agg=-1.0, max_comm_non_agg=-1.0;
         for (int i = 0; i < nprocs; i++) {
             double* recv_ptr = (double*)(recv_buf + i * struct_size);
             int* int_recv_ptr = (int*)(recv_ptr + 3);
+            int is_agg = int_recv_ptr[2];
+            if (recv_ptr[0] > max_two_phase_total) max_two_phase_total = recv_ptr[0];
+            if (recv_ptr[1] > max_io_phase_time) max_io_phase_time = recv_ptr[1];
+            if (is_agg && recv_ptr[2] > max_comm_agg) max_comm_agg = recv_ptr[2];
+            if (!is_agg && recv_ptr[2] > max_comm_non_agg) max_comm_non_agg = recv_ptr[2];
+        }
+        printf("timer\n\tmax_two_phase_total: %f\n", max_two_phase_total);
+        printf("\tmax_io_phase_time: %f\n", max_io_phase_time);
+        printf("\tmax_comm_phase_time (agg): %f\n", max_comm_agg);
+        printf("\tmax_comm_phase_time (non agg): %f\n", max_comm_non_agg);
+
+        printf("aggregator counters\n");
+        size_t min_val_size = 0, max_val_size = 0, total_val_size = 0;
+        int min_val_int = 0, max_val_int = 0, total_val_int = 0;
+        int cnt = 0;
+        // num_message_per_agg
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+            int is_agg = int_recv_ptr[2];
+            if (is_agg) {
+                if (int_recv_ptr[0] < min_val_int) min_val_int = int_recv_ptr[0];
+                if (int_recv_ptr[0] > max_val_int) max_val_int = int_recv_ptr[0];
+                total_val_int += int_recv_ptr[0];
+                cnt++;
+            }
+        }
+        if (min_val_int != max_val_int) {
+            printf("\tnum_message_per_agg: %d/%d/%.2f\n", min_val_int, max_val_int, (double) total_val_int / cnt);
+        } else {
+            printf("\tnum_message_per_agg: %d/%d/%d\n", min_val_int, min_val_int, min_val_int);
+        }
+
+        // num_wait_all_group (agg)
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+            int is_agg = int_recv_ptr[2];
+            if (is_agg) {
+                if (int_recv_ptr[1] < min_val_int) min_val_int = int_recv_ptr[1];
+                if (int_recv_ptr[1] > max_val_int) max_val_int = int_recv_ptr[1];
+                total_val_int += int_recv_ptr[1];
+                cnt++;
+            }
+        }
+        if (min_val_int != max_val_int) {
+            printf("\tnum_wait_all_group (agg): %d/%d/%.2f\n", min_val_int, max_val_int, (double) total_val_int / cnt);
+        } else {
+            printf("\tnum_wait_all_group (agg): %d/%d/%d\n", min_val_int, min_val_int, min_val_int);
+        }
+
+        printf("\t\tnum_wait_all_per_group (agg): ");
+        int num_wait_all_group_min_agg = min_val_int;
+        for (int j = 0; j < num_wait_all_group_min_agg; j++) {
+            min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                int is_agg = int_recv_ptr[2];
+                if (is_agg) {
+                    int* array_recv_ptr = int_recv_ptr + 3 + 4 * stat_ptr->rounds;
+                    if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
+                    if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
+                    total_val_int += array_recv_ptr[j];
+                    cnt++;
+                }
+            }
+            if (min_val_int != max_val_int)
+                printf("%d/%d/%.2f ", min_val_int, max_val_int, (double) total_val_int / cnt);
+            else
+                printf("%d/%d/%d ", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\n");
+
+    printf("\tnum_message_per_round_per_agg: ");
+        for (int j = 0; j < stat_ptr->rounds; j++) {
+            min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                int is_agg = int_recv_ptr[2];
+                if (is_agg) {
+                    int* array_recv_ptr = int_recv_ptr + 3;
+                    if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
+                    if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
+                    total_val_int += array_recv_ptr[j];
+                    cnt++;
+                }
+            }
+            if (min_val_int != max_val_int)
+                printf("%d/%d/%.2f ", min_val_int, max_val_int, (double) total_val_int / cnt);
+            else
+                printf("%d/%d/%d ", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\n");
+
+        // num_sender_processes_per_round_per_agg
+        printf("\tnum_sender_processes_per_round_per_agg: ");
+        for (int j = 0; j < stat_ptr->rounds; j++) {
+            min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                int is_agg = int_recv_ptr[2];
+                if (is_agg) {
+                    int* array_recv_ptr = int_recv_ptr + 3 + 2 * stat_ptr->rounds;
+                    if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
+                    if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
+                    total_val_int += array_recv_ptr[j];
+                    cnt++;
+                }
+            }
+            if (min_val_int != max_val_int)
+                printf("%d/%d/%.2f ", min_val_int, max_val_int, (double) total_val_int / cnt);
+            else
+                printf("%d/%d/%d ", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\n");
+
+        // num_sender_nodes_per_round_per_agg
+        printf("\tnum_sender_nodes_per_round_per_agg: ");
+        for (int j = 0; j < stat_ptr->rounds; j++) {
+            min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                int is_agg = int_recv_ptr[2];
+                if (is_agg) {
+                    int* array_recv_ptr = int_recv_ptr + 3 + 3 * stat_ptr->rounds;
+                    if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
+                    if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
+                    total_val_int += array_recv_ptr[j];
+                    cnt++;
+                }
+            }
+            if (min_val_int != max_val_int)
+                printf("%d/%d/%.2f ", min_val_int, max_val_int, (double) total_val_int / cnt);
+            else
+                printf("%d/%d/%d ", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\n");
+
+
+
+        // num_wait_all_group (non agg)
+        printf("non aggregator counters\n");
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+            int is_agg = int_recv_ptr[2];
+            if (is_agg == 0) {
+                if (int_recv_ptr[1] < min_val_int) min_val_int = int_recv_ptr[1];
+                if (int_recv_ptr[1] > max_val_int) max_val_int = int_recv_ptr[1];
+                total_val_int += int_recv_ptr[1];
+                cnt++;
+            }
+        }
+        if (min_val_int != max_val_int) {
+            printf("\tnum_wait_all_group (non agg): %d/%d/%.2f\n", min_val_int, max_val_int, (double) total_val_int / cnt);
+        } else {
+            printf("\tnum_wait_all_group (non agg): %d/%d/%d\n", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\t\tnum_wait_all_per_group (non agg): ");
+        int num_wait_all_group_min_non_agg = min_val_int;
+        for (int j = 0; j < num_wait_all_group_min_non_agg; j++) {
+            min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                int is_agg = int_recv_ptr[2];
+                if (is_agg == 0) {
+                    int* array_recv_ptr = int_recv_ptr + 3 + 4 * stat_ptr->rounds;
+                    if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
+                    if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
+                    total_val_int += array_recv_ptr[j];
+                    cnt++;
+                }
+            }
+            if (min_val_int != max_val_int)
+                printf("%d/%d/%.2f ", min_val_int, max_val_int, (double) total_val_int / cnt);
+            else
+                printf("%d/%d/%d ", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\n");
+
+        // num_receiver_per_round
+        printf("all processes counters\n\tnum_receiver_per_round: ");
+        for (int j = 0; j < stat_ptr->rounds; j++) {
+            min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                int* array_recv_ptr = int_recv_ptr + 3 + stat_ptr->rounds;
+                if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
+                if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
+                total_val_int += array_recv_ptr[j];
+                cnt++;
+            }
+            if (min_val_int != max_val_int)
+                printf("%d/%d/%.2f ", min_val_int, max_val_int, (double) total_val_int / cnt);
+            else
+                printf("%d/%d/%d ", min_val_int, min_val_int, min_val_int);
+        }
+        printf("\n");
+
+        // send_size_per_round
+        printf("\tsend_size_per_round: ");
+        for (int j = 0; j < stat_ptr->rounds; j++) {
+            min_val_size = SIZE_MAX, max_val_size = 0, total_val_size = 0, cnt = 0;
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 3);
+                size_t* array_recv_ptr = (size_t*) (int_recv_ptr + 3 + 5 * stat_ptr->rounds);
+                if (array_recv_ptr[j] < min_val_size) min_val_size = array_recv_ptr[j];
+                if (array_recv_ptr[j] > max_val_size) max_val_size = array_recv_ptr[j];
+                total_val_size += array_recv_ptr[j];
+                cnt++;
+            }
+            if (min_val_size != max_val_size)
+                printf("%zu/%zu/%.2f ", min_val_size, max_val_size, (double) total_val_size / cnt);
+            else
+                printf("%zu/%zu/%zu ", min_val_size, min_val_size, min_val_size);
+        }
+        printf("\n");
+        int agg_printed = 0;
+        int non_agg_printed = 0;
+        for (int i = 0; i < nprocs; i++) {
+            if (agg_printed == 1 && non_agg_printed == 1) {
+                break;
+            }
+            double* recv_ptr = (double*)(recv_buf + i * struct_size);
+            int* int_recv_ptr = (int*)(recv_ptr + 3);
+
+            int is_agg = int_recv_ptr[2];
+            if (agg_printed == 0 && is_agg == 1) {
+                agg_printed = 1;
+            } else if (non_agg_printed == 0 && is_agg == 0) {
+                non_agg_printed = 1;
+            } else {
+                continue;
+            }
+
             int* array_recv_ptr1 = int_recv_ptr + 3;
             int* array_recv_ptr2 = array_recv_ptr1 + stat_ptr->rounds;
             int* array_recv_ptr3 = array_recv_ptr2 + stat_ptr->rounds;
@@ -612,6 +841,7 @@ static void post_process_statistics(Statistic* stat_ptr, MPI_Comm comm, int myra
             }
             printf("\n");
         }
+        printf("==============\n");
     }
 
     // free mem
@@ -674,7 +904,6 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
                       .num_wait_all_per_group                 = NULL,
                       .use_ind_io                             = 0,
                       .use_one_side_io                        = 0,
-                      .cb_nodes                               = fd->hints->cb_nodes,
                       .num_procs_per_node                     = 128};
     char* p = getenv ("ROMIO_NUM_PROCS_PER_NODE");
     if (p != NULL) { stat.num_procs_per_node = atoi(p); }
@@ -890,7 +1119,7 @@ else
         ADIOI_Free(my_req);
     }
     stat.total_two_phase_time += MPI_Wtime();
-    post_process_statistics(&stat, fd->comm, myrank, nprocs, fd->filename, fd->is_agg);
+    post_process_statistics(&stat, myrank, nprocs, fd);
     ADIOI_Free(offset_list);
 
     /* If this collective write is followed by an independent write, it's
