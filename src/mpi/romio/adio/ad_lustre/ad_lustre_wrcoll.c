@@ -555,7 +555,8 @@ static void print_across_proc(
     int num_int,
     int array_idx,
     Statistic* stat_ptr,
-    int is_int // 0: size_t, 1: int
+    int is_int, // 0: size_t, 1: int
+    int num_nodes
 ) {
     if (!title) return;
     printf("%s\n", title);
@@ -587,11 +588,18 @@ static void print_across_proc(
             if (is_agg == -1 || is_proc_agg == is_agg) {
                 if (is_int == 0) {
                     size_t *array_recv_ptr = (size_t*)(int_recv_ptr + num_int + array_idx * stat_ptr->rounds);
+                    if (array_idx > 3) {
+                        array_recv_ptr = (size_t*)(int_recv_ptr + num_int + (array_idx - 1) * stat_ptr->rounds + stat_ptr->rounds * num_nodes);
+                    }
                     if (array_recv_ptr[j] < min_val_size) min_val_size = array_recv_ptr[j];
                     if (array_recv_ptr[j] > max_val_size) max_val_size = array_recv_ptr[j];
                     total_val_size += array_recv_ptr[j];
                 } else {
                     int *array_recv_ptr = int_recv_ptr + num_int + array_idx * stat_ptr->rounds;
+                    if (array_idx > 3) {
+                        array_recv_ptr = int_recv_ptr + num_int + (array_idx - 1) * stat_ptr->rounds;
+                        array_recv_ptr += stat_ptr->rounds * num_nodes;
+                    }
                     if (array_recv_ptr[j] < min_val_int) min_val_int = array_recv_ptr[j];
                     if (array_recv_ptr[j] > max_val_int) max_val_int = array_recv_ptr[j];
                     total_val_int += array_recv_ptr[j];
@@ -705,9 +713,10 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     // print time
     // double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
     stat_ptr->comm_time = stat_ptr->total_two_phase_time - stat_ptr->io_time;
-
+    int num_nodes = nprocs / stat_ptr->num_procs_per_node;
     size_t struct_size = sizeof(double) * 4 + sizeof(int) * 3;
-    struct_size += stat_ptr->rounds * sizeof(int) * 5;
+    struct_size += stat_ptr->rounds * sizeof(int) * 4;
+    struct_size += stat_ptr->rounds * num_nodes * sizeof(int);
     struct_size += stat_ptr->rounds * sizeof(size_t);
 
     char* send_buf = (char*) malloc(struct_size);
@@ -723,11 +732,11 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     int* array_buf2 = array_buf1 + stat_ptr->rounds;
     int* array_buf3 = array_buf2 + stat_ptr->rounds;
     int* array_buf4 = array_buf3 + stat_ptr->rounds;
-    int* array_buf5 = array_buf4 + stat_ptr->rounds;
+    int* array_buf5 = array_buf4 + stat_ptr->rounds * num_nodes;
     if (fd->is_agg){
         memcpy(array_buf1, stat_ptr->num_message_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf3, stat_ptr->num_sender_processes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
-        memcpy(array_buf4, stat_ptr->num_sender_nodes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
+        memcpy(array_buf4, stat_ptr->num_sender_nodes_per_round_per_agg, stat_ptr->rounds * num_nodes * sizeof(int));
     }
     memcpy(array_buf2, stat_ptr->num_receiver_per_round, stat_ptr->rounds * sizeof(int));
     memcpy(array_buf5, stat_ptr->num_wait_all_per_group, stat_ptr->rounds * sizeof(int));
@@ -747,6 +756,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
 
     if (myrank == 0) {
         printf("============== %s\nbasic\n", fd->filename);
+        printf("\tphase_shuffle: %d\n", fd->hints->fs_hints.lustre.phase_shuffle);
         printf("\trounds: %d\n", stat_ptr->rounds);
         printf("\tuse_ind_io: %d\n", stat_ptr->use_ind_io);
         printf("\tuse_one_side_io: %d\n", stat_ptr->use_one_side_io);
@@ -823,10 +833,39 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
         }
 
         if (max_val_int > 0)
-            print_across_proc("\t\tnum_wait_all_per_group (agg): ", min_val_int, nprocs, 1, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1);
-        print_across_proc("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 0, stat_ptr, 1);
-        print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 2, stat_ptr, 1);
-        print_across_proc("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 3, stat_ptr, 1);
+            print_across_proc("\t\tnum_wait_all_per_group (agg): ", min_val_int, nprocs, 1, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1, num_nodes);
+        print_across_proc("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 0, stat_ptr, 1, num_nodes);
+        print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 2, stat_ptr, 1, num_nodes);
+
+        // print_across_proc("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 3, stat_ptr, 1, num_nodes);
+        int *temp_array_nodes = (int*) malloc(num_nodes);
+        int *temp_array_rounds = (int*) malloc(stat_ptr->rounds);
+        for (int j = 0; j < stat_ptr->rounds; j++) {
+            for (int k = 0; k < num_nodes; k++) {
+                temp_array_nodes[k] = 0;
+            }
+            for (int i = 0; i < nprocs; i++) {
+                int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
+                int is_agg = int_recv_ptr[2];
+                if (is_agg) {
+                    int *array_recv_ptr = int_recv_ptr + 3 + 3 * stat_ptr->rounds;
+                    for (int k = 0; k < num_nodes; k++) {
+                        temp_array_nodes[k] += array_recv_ptr[j * num_nodes + k];
+                    }
+                }
+            }
+            int num_sender_nodes = 0;
+            for (int k = 0; k < num_nodes; k++) {
+                if (temp_array_nodes[k] > 0) {
+                    num_sender_nodes++;
+                }
+            }
+            temp_array_rounds[j] = num_sender_nodes;
+        }
+        print_array("\tnum_sender_nodes_per_round: ", stat_ptr->rounds, temp_array_rounds, NULL);
+
+        free(temp_array_nodes);
+        free(temp_array_rounds);
 
         // num_wait_all_group (non agg)
         printf("non aggregator counters\n");
@@ -848,9 +887,9 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
         }
 
         if (max_val_int > 0)
-            print_across_proc("\t\tnum_wait_all_per_group (non agg): ", min_val_int, nprocs, 0, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1);
-        print_across_proc("all processes counters\n\tnum_receiver_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 1, stat_ptr, 1);
-        print_across_proc("\tsend_size_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 5, stat_ptr, 0);
+            print_across_proc("\t\tnum_wait_all_per_group (non agg): ", min_val_int, nprocs, 0, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1, num_nodes);
+        print_across_proc("all processes counters\n\tnum_receiver_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 1, stat_ptr, 1, num_nodes);
+        print_across_proc("\tsend_size_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 5, stat_ptr, 0, num_nodes);
         int agg_printed = 0;
         int non_agg_printed = 0;
 
@@ -874,7 +913,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             int* array_recv_ptr2 = array_recv_ptr1 + stat_ptr->rounds;
             int* array_recv_ptr3 = array_recv_ptr2 + stat_ptr->rounds;
             int* array_recv_ptr4 = array_recv_ptr3 + stat_ptr->rounds;
-            int* array_recv_ptr5 = array_recv_ptr4 + stat_ptr->rounds;
+            int* array_recv_ptr5 = array_recv_ptr4 + stat_ptr->rounds * num_nodes;
             size_t* array_recv_ptr6 = (size_t*)(array_recv_ptr5 + stat_ptr->rounds);
             printf("-- proc %d\n", i);
             printf("\ttotal_two_phase_time: %f\n", recv_ptr[0]);
@@ -886,7 +925,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             if (int_recv_ptr[2]) {
                 print_array("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, array_recv_ptr1, NULL);
                 print_array("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, array_recv_ptr3, NULL);
-                print_array("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, array_recv_ptr4, NULL);
+                // print_array("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, array_recv_ptr4, NULL);
             }
             print_array("\tnum_receiver_per_round: ", stat_ptr->rounds, array_recv_ptr2, NULL);
             print_array("\tsend_size_per_round: ", stat_ptr->rounds, NULL, array_recv_ptr6);
@@ -1246,7 +1285,11 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
     int start_pos   = 0;
     int phase_shuffle = 0;
     phase_shuffle = fd->hints->fs_hints.lustre.phase_shuffle;
-    myprintf("phase_shuffle hint: %d\n", phase_shuffle);
+    printf("phase_shuffle hint (from hint): %d\n", phase_shuffle);
+    char* p = getenv ("ROMIO_LUSTRE_PHASE_SHUFFLE");
+    if (p != NULL) { phase_shuffle = atoi (p); }
+
+    printf("phase_shuffle hint (final): %d\n", phase_shuffle);
 
     if (phase_shuffle != 1 && phase_shuffle != 2 && phase_shuffle != 3) {
         // default: phase_shuffle = 0; no shuffle
@@ -1403,10 +1446,11 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     if ((max_end_loc - min_st_loc + 1) % step_size)
         ntimes++;
     stat_ptr->rounds = ntimes;
+    int num_nodes = nprocs / stat_ptr->num_procs_per_node;
     if (fd->is_agg) {
         stat_ptr->num_message_per_round_per_agg = (int *) calloc(ntimes, sizeof(int));
         stat_ptr->num_sender_processes_per_round_per_agg = (int *) calloc(ntimes, sizeof(int));
-        stat_ptr->num_sender_nodes_per_round_per_agg = (int *) calloc(ntimes, sizeof(int));
+        stat_ptr->num_sender_nodes_per_round_per_agg = (int *) calloc(ntimes * num_nodes, sizeof(int));
     }
     stat_ptr->num_receiver_per_round = (int *) calloc(ntimes, sizeof(int));
     stat_ptr->send_size_per_round = (size_t *) calloc(ntimes, sizeof(size_t));
@@ -1703,8 +1747,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                             int node_id = i / stat_ptr->num_procs_per_node;
                             if (node_id > nodes_recorded) {
                                 nodes_recorded = node_id;
-                                stat_ptr->num_sender_nodes_per_round_per_agg[m]++;
+                                stat_ptr->num_sender_nodes_per_round_per_agg[m * num_nodes + node_id]++;
                             }
+                            printf("DEBUG %d: at phase %d (actual %d), rank %d (node %d) sends %lld bytes to rank %d\n", myrank, m, mphase, i, node_id ,others_req[i].lens[j], myrank);
                         }
                     }
                 }
