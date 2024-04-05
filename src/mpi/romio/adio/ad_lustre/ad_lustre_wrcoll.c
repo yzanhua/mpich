@@ -632,7 +632,7 @@ static void print_across_proc(
             } else {
                 if (same_cnt > 0) {
                     if (prev_min_int != prev_max_int)
-                        printf ("%d/%d/%d/%.2fX%d ", prev_min_int, prev_max_int, total_val_int, (double) prev_avg_int / 100.0, same_cnt);
+                        printf ("%d/%d/%d/%.2fX%d ", prev_min_int, prev_max_int, prev_total_int, (double) prev_avg_int / 100.0, same_cnt);
                     else
                         printf ("%d//X%d ", prev_min_int, same_cnt);
                 }
@@ -838,8 +838,8 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
         print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 2, stat_ptr, 1, num_nodes);
 
         // print_across_proc("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 3, stat_ptr, 1, num_nodes);
-        int *temp_array_nodes = (int*) malloc(num_nodes);
-        int *temp_array_rounds = (int*) malloc(stat_ptr->rounds);
+        int *temp_array_nodes = (int*) malloc(num_nodes * sizeof(int));
+        int *temp_array_rounds = (int*) malloc(stat_ptr->rounds * sizeof(int));
         for (int j = 0; j < stat_ptr->rounds; j++) {
             for (int k = 0; k < num_nodes; k++) {
                 temp_array_nodes[k] = 0;
@@ -1285,11 +1285,8 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
     int start_pos   = 0;
     int phase_shuffle = 0;
     phase_shuffle = fd->hints->fs_hints.lustre.phase_shuffle;
-    printf("phase_shuffle hint (from hint): %d\n", phase_shuffle);
     char* p = getenv ("ROMIO_LUSTRE_PHASE_SHUFFLE");
     if (p != NULL) { phase_shuffle = atoi (p); }
-
-    printf("phase_shuffle hint (final): %d\n", phase_shuffle);
 
     if (phase_shuffle != 1 && phase_shuffle != 2 && phase_shuffle != 3) {
         // default: phase_shuffle = 0; no shuffle
@@ -1350,6 +1347,19 @@ static void determine_phase_order(ADIO_File fd, int myrank, int nprocs, int num_
             if (current_phase == start_phase) {
                 start_phase = (start_phase + 1) % num_phases;
                 current_phase = start_phase;
+            }
+        }
+        if (num_phases > 1) {
+            for (int i = 0; i < fd->hints->cb_nodes; i++) {
+                int current = 0;
+                int next = phase_orders[i * num_phases + current];
+                int temp = 0;
+                do {
+                    temp = phase_orders[i * num_phases + next];
+                    phase_orders[i * num_phases + next] = current;
+                    current = next;
+                    next = temp;
+                } while(current != 0);
             }
         }
     }
@@ -1749,7 +1759,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                 nodes_recorded = node_id;
                                 stat_ptr->num_sender_nodes_per_round_per_agg[m * num_nodes + node_id]++;
                             }
-                            printf("DEBUG %d: at phase %d (actual %d), rank %d (node %d) sends %lld bytes to rank %d\n", myrank, m, mphase, i, node_id ,others_req[i].lens[j], myrank);
                         }
                     }
                 }
