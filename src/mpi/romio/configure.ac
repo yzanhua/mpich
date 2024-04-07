@@ -1604,6 +1604,12 @@ AC_CHECK_TYPES([MPI_Datarep_conversion_function,
                 MPI_Datarep_conversion_function_c],
                [], [], [#include <mpi.h>])
 
+# check subroutines when ROMIO is built outside MPICH
+if test "$FROM_MPICH" = no ; then
+   AC_CHECK_FUNCS([MPIR_Get_node_id], [],
+                  [AC_SEARCH_LIBS([MPIR_Get_node_id], [mpi])])
+fi
+
 CPPFLAGS=$saved_CPPFLAGS
 
 AC_SUBST(ARCH)
