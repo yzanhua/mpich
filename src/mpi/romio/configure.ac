@@ -1608,6 +1608,9 @@ AC_CHECK_TYPES([MPI_Datarep_conversion_function,
 if test "$FROM_MPICH" = no ; then
    AC_CHECK_FUNCS([MPIR_Get_node_id], [],
                   [AC_SEARCH_LIBS([MPIR_Get_node_id], [mpi])])
+
+   AC_CHECK_FUNCS([MPIR_Ext_datatype_iscontig], [],
+                  [AC_SEARCH_LIBS([MPIR_Ext_datatype_iscontig], [mpi])])
 fi
 
 CPPFLAGS=$saved_CPPFLAGS
