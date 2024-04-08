@@ -7,7 +7,13 @@
 #include <unistd.h>
 
 #include <stdlib.h>
+
+#ifdef HAVE_MPL_ALIGNED_ALLOC
 #include "mpl.h"
+#else
+#include <malloc.h>
+#define MPL_aligned_alloc(x, y, z) memalign(x, y)
+#endif
 
 #define LUSTRE_MEMALIGN (1<<12) /* to use page_shift */
 
