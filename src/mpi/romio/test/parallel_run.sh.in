@@ -64,6 +64,10 @@ elif test "x$exe_name" = xghost_cell ; then
    $mpirun -np 2 ${valgrind_opt} $1 $FILENAME
 elif test "x$exe_name" = xcheck_type_contig ; then
    $mpirun -np 2 ${valgrind_opt} $1 $FILENAME
+elif test "x$exe_name" = xbuf_noncontig ; then
+   $mpirun -np 2 ${valgrind_opt} $1 $FILENAME
+elif test "x$exe_name" = xpio_noncontig ; then
+   $mpirun -np 2 ${valgrind_opt} $1 -n 4 -c 2048 $FILENAME
 else
    $mpirun -np 4 ${valgrind_opt} $1 -fname $FILENAME
 fi
