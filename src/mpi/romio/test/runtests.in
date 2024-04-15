@@ -244,6 +244,7 @@ CleanExe excl
 testfiles="$testfiles file_info.out"
 \rm -f file_info.out
 MakeExe file_info
+\rm -f $FILENAME*
 for fs in @FILE_SYSTEM@ ; do
    OutTime
    echo "**** Testing file_info.c - file system = $fs ****"
@@ -448,6 +449,7 @@ if [ @NOF77@ = 0 ] ; then
     $mpirun -np 4 ${valgrind_opt} ./pfcoll_test -fname $FILENAME
     # CheckOutput pfcoll_test
     CleanExe pfcoll_test
+    \rm -f $FILENAME*
 #
 echo ""
 fi
