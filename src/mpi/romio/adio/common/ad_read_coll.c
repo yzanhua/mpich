@@ -6,6 +6,8 @@
 #include "adio.h"
 #include "adio_extern.h"
 
+#include <stdbool.h> /* type bool */
+
 #ifdef MPL_USE_DBG_LOGGING
 #define RDCOLL_DEBUG 1
 #endif

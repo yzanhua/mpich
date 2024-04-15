@@ -6,6 +6,8 @@
 #include "mpioimpl.h"
 #include "adio_extern.h"
 
+#include <stdbool.h> /* type bool, constant true and false  */
+
 #ifdef HAVE_WEAK_SYMBOLS
 
 #if defined(HAVE_PRAGMA_WEAK)
