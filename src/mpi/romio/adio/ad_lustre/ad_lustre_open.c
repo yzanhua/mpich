@@ -143,10 +143,18 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
 #define STRIPE_COUNT 4
 
         fd->hints->striping_unit = STRIPE_SIZE;
-        ADIOI_Info_set(fd->info, "striping_unit", xstr(STRIPE_SIZE));
+        char* p1 = getenv("MIMIC_LUSTRE_STRIPE_SIZE");
+        if (p1) {
+            fd->hints->striping_unit = atoi(p1);
+        }
+        ADIOI_Info_set(fd->info, "striping_unit", xstr(fd->hints->striping_unit));
 
         fd->hints->striping_factor = STRIPE_COUNT;
-        ADIOI_Info_set(fd->info, "striping_factor", xstr(STRIPE_COUNT));
+        char* p2 = getenv("MIMIC_LUSTRE_STRIPE_COUNT");
+        if (p2) {
+            fd->hints->striping_factor = atoi(p2);
+        }
+        ADIOI_Info_set(fd->info, "striping_factor", xstr(fd->hints->striping_factor));
 
         fd->hints->start_iodevice = 0;
         ADIOI_Info_set(fd->info, "romio_lustre_start_iodevice", "0");
