@@ -60,6 +60,8 @@ elif test "x$exe_name" = xsyshints ; then
    $mpirun -np 1 ${valgrind_opt} $1 -fname $srcdir/test_hintfile
 elif test "x$exe_name" = xtypes_with_zeros ; then
    $mpirun -np 2 ${valgrind_opt} $1 -fname $FILENAME
+elif test "x$exe_name" = xghost_cell ; then
+   $mpirun -np 2 ${valgrind_opt} $1 $FILENAME
 else
    $mpirun -np 4 ${valgrind_opt} $1 -fname $FILENAME
 fi
