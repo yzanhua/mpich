@@ -49,4 +49,4 @@ TEST_EXTENSIONS = .sh
 LOG_COMPILER = $(builddir)/parallel_run.sh
 SH_LOG_COMPILER =
 
-EXTRA_DIST = romio_hintfile
+EXTRA_DIST = test_hintfile
