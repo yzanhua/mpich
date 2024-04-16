@@ -1593,6 +1593,14 @@ AC_MSG_NOTICE([setting CFLAGS to $CFLAGS])
 AC_MSG_NOTICE([setting USER_CFLAGS to $USER_CFLAGS])
 AC_MSG_NOTICE([setting USER_FFLAGS to $USER_FFLAGS])
 
+# check whether some constants and subroutines are defined in mpi.h
+saved_CPPFLAGS=$CPPFLAGS
+CPPFLAGS="$MPI_H_INCLUDE -I${top_build_dir}/include $CPPFLAGS"
+
+AC_CHECK_DECLS([MPI_ERRORS_ABORT], [], [], [[#include <mpi.h>]])
+
+CPPFLAGS=$saved_CPPFLAGS
+
 AC_SUBST(ARCH)
 AC_SUBST(FILE_SYSTEM)
 AC_SUBST(CC)
