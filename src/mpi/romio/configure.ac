@@ -1599,6 +1599,11 @@ CPPFLAGS="$MPI_H_INCLUDE -I${top_build_dir}/include $CPPFLAGS"
 
 AC_CHECK_DECLS([MPI_ERRORS_ABORT], [], [], [[#include <mpi.h>]])
 
+AC_CHECK_TYPES([MPI_Datarep_conversion_function,
+                MPI_Datarep_extent_function,
+                MPI_Datarep_conversion_function_c],
+               [], [], [#include <mpi.h>])
+
 CPPFLAGS=$saved_CPPFLAGS
 
 AC_SUBST(ARCH)
