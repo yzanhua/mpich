@@ -43,7 +43,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
                                         ADIO_Offset min_st_loc, ADIO_Offset max_end_loc,
                                         int contig_access_count,
                                         int *striping_info,
-                                        ADIO_Offset ** buf_idx, int *error_code);
+                                        ADIO_Offset ** buf_idx, int *error_code, double* io_time_ptr);
 static void ADIOI_LUSTRE_Fill_send_buffer_no_send(ADIO_File fd, const void *buf,
                                           ADIOI_Flatlist_node * flat_buf,
                                           char **send_buf,
@@ -136,6 +136,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, int count,
     MPI_Comm_rank(fd->comm, &myrank);
 
     orig_fp = fd->fp_ind;
+    double io_time = 0.0;
+    double total_time = -MPI_Wtime();
 
     /* Check if collective write is actually necessary, if cb_write hint isn't
      * disabled by users.
@@ -299,7 +301,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, int count,
         ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, nprocs, myrank,
                                     others_req, my_req, offset_list, len_list,
                                     min_st_loc, max_end_loc,
-                                    contig_access_count, striping_info, buf_idx, error_code);
+                                    contig_access_count, striping_info, buf_idx, error_code, &io_time);
 
         /* free all memory allocated */
 /*
@@ -316,6 +318,18 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, int count,
     }
     if (fd->hints->cb_write != ADIOI_HINT_DISABLE) {
         ADIOI_Free(offset_list);
+    }
+    total_time += MPI_Wtime();
+
+    double max_total_time = -1;
+    double max_io_time = -1;
+
+    MPI_Reduce(&total_time, &max_total_time, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
+    MPI_Reduce(&io_time, &max_io_time, 1, MPI_DOUBLE, MPI_MAX, 0, fd->comm);
+    if (myrank == 0) {
+        printf("File: %s\n", fd->filename);
+        printf("Total time: %lf\n", max_total_time);
+        printf( "IO time: %lf\n", max_io_time);
     }
 
     /* If this collective write is followed by an independent write, it's
@@ -377,7 +391,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
                                         ADIO_Offset * len_list,
                                         ADIO_Offset min_st_loc, ADIO_Offset max_end_loc,
                                         int contig_access_count,
-                                        int *striping_info, ADIO_Offset ** buf_idx, int *error_code)
+                                        int *striping_info, ADIO_Offset ** buf_idx, int *error_code, double *io_time_ptr)
 {
     /* Each process sends all its write requests to I/O aggregators based on
      * the file domain assignment to the aggregators. In this implementation,
@@ -623,8 +637,10 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd, const void *buf,
              */
             ADIOI_Assert(srt_off[i] < real_off + real_size && srt_off[i] >= real_off);
 
+            *io_time_ptr -= MPI_Wtime();
             ADIO_WriteContig(fd, write_buf + (srt_off[i] - real_off), srt_len[i],
                              MPI_BYTE, ADIO_EXPLICIT_OFFSET, srt_off[i], &status, error_code);
+            *io_time_ptr += MPI_Wtime();
             if (*error_code != MPI_SUCCESS)
                 goto over;
         }
