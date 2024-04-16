@@ -329,7 +329,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, int count,
     if (myrank == 0) {
         printf("File: %s\n", fd->filename);
         printf("Total time: %lf\n", max_total_time);
-        printf( "IO time: %lf\n", max_io_time);
+        printf("IO time: %lf\n", max_io_time);
+        printf("Comm time: %lf\n", max_total_time - max_io_time);
     }
 
     /* If this collective write is followed by an independent write, it's
