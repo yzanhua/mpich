@@ -1525,7 +1525,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     batch_idx = batch_nreqs = 0;
     nreqs = (int*) ADIOI_Malloc(nbufs * sizeof(int));
 
-    int interleaving_waitall_n_write = 1;
     int ibuf = 0;
     int fileview_indx = 0;
     int n_buftypes = 0;
@@ -1674,21 +1673,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
 
         /* accumulate nreqs across nbufs rounds */
         batch_nreqs += nreqs[ibuf];
-
-        /* Check if accumulated pending requests can cause high traffic
-         * congestion. If yes, then write to file now.
-         */
-        int write_now;
-        if (fd->is_agg)
-            write_now = (batch_nreqs >= nprocs-2);  /* -2 to exclude send/recv self */
-        else
-            /* For I/O patterns that each non-aggregator has a request falling
-             * into all aggregtor's file domain, set the trigger condition
-             * (cb_nodes * 2) appears to be the best. FYI, setting the
-             * condition to (batch_nreqs >= nprocs) and it is no better, as
-             * non-aggregators may post too many issend.
-             */
-            write_now = (batch_nreqs >= cb_nodes * 2);
 
         /* commit writes for this batch of numBufs */
         if (m % nbufs == nbufs - 1 || m == ntimes - 1) {
@@ -2396,13 +2380,11 @@ int num_memcpy = 0;
                     /* get the aggregator's MPI rank ID */
                     // int dest = fd->hints->ranklist[q];
                     if (isUserBuf) {
-                        jj++;
                         ADIOI_bs_agg_cache_sr_req(send_infos, send_size[q], same_buf_ptr, q, 1);
                     }
                         // MPI_Issend(same_buf_ptr, send_size[q], MPI_BYTE, dest,
                         //            ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
                     else {
-                        jj++;
                         ADIOI_bs_agg_cache_sr_req(send_infos, send_size[q], send_buf[q], q, 1);
                     }
                         // MPI_Issend(send_buf[q], send_size[q], MPI_BYTE, dest,
