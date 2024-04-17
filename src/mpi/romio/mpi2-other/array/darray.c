@@ -41,8 +41,8 @@ Output Parameters:
 .N fortran
 @*/
 int MPI_Type_create_darray(int size, int rank, int ndims,
-                           int *array_of_gsizes, int *array_of_distribs,
-                           int *array_of_dargs, int *array_of_psizes,
+                           const int *array_of_gsizes, const int *array_of_distribs,
+                           const int *array_of_dargs, const int *array_of_psizes,
                            int order, MPI_Datatype oldtype, MPI_Datatype * newtype)
 {
     int err, error_code;
