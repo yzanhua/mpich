@@ -33,16 +33,6 @@ static void ADIOI_W_Exchange_data(ADIO_File fd, void *buf, char *write_buf,
                                   int *send_buf_idx, int *curr_to_proc,
                                   int *done_to_proc, int *hole, int iter,
                                   MPI_Aint buftype_extent, MPI_Aint * buf_idx, int *error_code);
-void ADIOI_Fill_send_buffer(ADIO_File fd, void *buf, ADIOI_Flatlist_node
-                            * flat_buf, char **send_buf, ADIO_Offset
-                            * offset_list, ADIO_Offset * len_list, int *send_size,
-                            MPI_Request * requests, int *sent_to_proc,
-                            int nprocs, int myrank,
-                            int contig_access_count, ADIO_Offset
-                            min_st_offset, ADIO_Offset fd_size,
-                            ADIO_Offset * fd_start, ADIO_Offset * fd_end,
-                            int *send_buf_idx, int *curr_to_proc,
-                            int *done_to_proc, int iter, MPI_Aint buftype_extent);
 void ADIOI_Heap_merge(ADIOI_Access * others_req, int *count,
                       ADIO_Offset * srt_off, int *srt_len, int *start_pos,
                       int nprocs, int nprocs_recv, int total_elements);
@@ -426,7 +416,7 @@ static void ADIOI_Exch_and_write(ADIO_File fd, void *buf, MPI_Datatype
                         count[i]++;
                         ADIOI_Assert((((ADIO_Offset) (uintptr_t) write_buf) + req_off - off) ==
                                      (ADIO_Offset) (uintptr_t) (write_buf + req_off - off));
-                        MPI_Get_address(write_buf + req_off - off, &(others_req[i].mem_ptrs[j]));
+                        others_req[i].mem_ptrs[j] = req_off - off;
                         ADIOI_Assert((off + size - req_off) == (int) (off + size - req_off));
                         recv_size[i] += (int) (MPL_MIN(off + size - req_off, (unsigned) req_len));
 
@@ -530,9 +520,9 @@ static void ADIOI_W_Exchange_data(ADIO_File fd, void *buf, char *write_buf,
     int i, j, k, *tmp_len, nprocs_recv, nprocs_send, err;
     char **send_buf = NULL;
     MPI_Request *requests, *send_req;
-    MPI_Datatype *recv_types;
+    MPI_Datatype *recv_types, self_recv_type = MPI_DATATYPE_NULL;
     MPI_Status *statuses, status;
-    int *srt_len = NULL, sum;
+    int *srt_len = NULL, sum, num_rtypes, nreqs;
     ADIO_Offset *srt_off = NULL;
     static char myname[] = "ADIOI_W_EXCHANGE_DATA";
 
@@ -554,29 +544,31 @@ static void ADIOI_W_Exchange_data(ADIO_File fd, void *buf, char *write_buf,
             nprocs_send++;
     }
 
-    recv_types = (MPI_Datatype *)
-        ADIOI_Malloc((nprocs_recv + 1) * sizeof(MPI_Datatype));
-/* +1 to avoid a 0-size malloc */
+    recv_types = (MPI_Datatype *) ADIOI_Malloc((nprocs_recv + 1) * sizeof(MPI_Datatype));
+    /* +1 to avoid a 0-size malloc */
 
     tmp_len = (int *) ADIOI_Malloc(nprocs * sizeof(int));
     j = 0;
     for (i = 0; i < nprocs; i++) {
         if (recv_size[i]) {
-/* take care if the last off-len pair is a partial recv */
+            MPI_Datatype *dtype;
+            dtype = (i != myrank) ? (recv_types + j) : (&self_recv_type);
+
             if (partial_recv[i]) {
+                /* take care if the last off-len pair is a partial recv */
                 k = start_pos[i] + count[i] - 1;
                 tmp_len[i] = others_req[i].lens[k];
                 others_req[i].lens[k] = partial_recv[i];
             }
             ADIOI_Type_create_hindexed_x(count[i],
                                          &(others_req[i].lens[start_pos[i]]),
-                                         &(others_req[i].mem_ptrs[start_pos[i]]),
-                                         MPI_BYTE, recv_types + j);
-            /* absolute displacements; use MPI_BOTTOM in recv */
-            MPI_Type_commit(recv_types + j);
-            j++;
+                                         &(others_req[i].mem_ptrs[start_pos[i]]), MPI_BYTE, dtype);
+            MPI_Type_commit(dtype);
+            if (i != myrank)
+                j++;
         }
     }
+    num_rtypes = j;     /* number of non-self receive datatypes created */
 
     /* To avoid a read-modify-write, check if there are holes in the
      * data to be written. For this, merge the (sorted) offset lists
@@ -644,25 +636,35 @@ static void ADIOI_W_Exchange_data(ADIO_File fd, void *buf, char *write_buf,
     }
 
     if (fd->atomicity) {
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
-        requests = (MPI_Request *)
-            ADIOI_Malloc((nprocs_send + 1) * sizeof(MPI_Request));
+        /* nreqs is the number of Isend and Irecv to be posted */
+        nreqs = (send_size[myrank]) ? (nprocs_send - 1) : nprocs_send;
+        requests = (MPI_Request *) ADIOI_Malloc((nreqs + 1) * sizeof(MPI_Request));
         send_req = requests;
     } else {
-        requests = (MPI_Request *)
-            ADIOI_Malloc((nprocs_send + nprocs_recv + 1) * sizeof(MPI_Request));
+        nreqs = nprocs_send + nprocs_recv;
+        if (send_size[myrank])  /* NO send to and recv from self */
+            nreqs -= 2;
+        requests = (MPI_Request *) ADIOI_Malloc((nreqs + 1) * sizeof(MPI_Request));
         /* +1 to avoid a 0-size malloc */
 
         /* post receives */
         j = 0;
         for (i = 0; i < nprocs; i++) {
-            if (recv_size[i]) {
-                MPI_Irecv(MPI_BOTTOM, 1, recv_types[j], i, ADIOI_COLL_TAG(i, iter),
+            if (recv_size[i] == 0)
+                continue;
+            if (i != myrank) {
+                MPI_Irecv(write_buf, 1, recv_types[j], i, ADIOI_COLL_TAG(i, iter),
                           fd->comm, requests + j);
                 j++;
+            } else if (buftype_is_contig) {
+                /* sen/recv to/from self uses MPI_Unpack() */
+                int position = 0;
+                MPI_Unpack((char *) buf + buf_idx[i], recv_size[i], &position,
+                           write_buf, 1, self_recv_type, MPI_COMM_SELF);
+                buf_idx[i] += recv_size[i];
             }
         }
-        send_req = requests + nprocs_recv;
+        send_req = requests + j;
     }
 
 /* post sends. if buftype_is_contig, data can be directly sent from
@@ -674,8 +676,9 @@ static void ADIOI_W_Exchange_data(ADIO_File fd, void *buf, char *write_buf,
     if (buftype_is_contig) {
         j = 0;
         for (i = 0; i < nprocs; i++)
-            if (send_size[i]) {
-                MPI_Isend(((char *) buf) + buf_idx[i], send_size[i],
+            if (send_size[i] && i != myrank) {
+                ADIOI_Assert(buf_idx[i] != -1);
+                MPI_Isend((char *) buf + buf_idx[i], send_size[i],
                           MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, send_req + j);
                 j++;
                 buf_idx[i] += send_size[i];
@@ -701,52 +704,51 @@ static void ADIOI_W_Exchange_data(ADIO_File fd, void *buf, char *write_buf,
     }
 
     if (fd->atomicity) {
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
+        /* In atomic mode, we must use blocking receives to receive data in the
+         * same increasing order of MPI process rank IDs,
+         */
         j = 0;
         for (i = 0; i < nprocs; i++) {
-            MPI_Status wkl_status;
-            if (recv_size[i]) {
-                MPI_Recv(MPI_BOTTOM, 1, recv_types[j], i, ADIOI_COLL_TAG(i, iter), fd->comm,
-                         &wkl_status);
-                j++;
+            if (recv_size[i] == 0)
+                continue;
+            if (i != myrank) {
+                MPI_Recv(write_buf, 1, recv_types[j++], i, ADIOI_COLL_TAG(i, iter),
+                         fd->comm, &status);
+            } else {
+                /* sen/recv to/from self uses MPI_Unpack() */
+                int position = 0;
+                char *ptr = (buftype_is_contig) ? (char *) buf + buf_idx[i] : send_buf[i];
+                MPI_Unpack(ptr, recv_size[i], &position, write_buf, 1, self_recv_type,
+                           MPI_COMM_SELF);
+                buf_idx[i] += recv_size[i];
             }
         }
+    } else if (!buftype_is_contig && recv_size[myrank]) {
+        int position = 0;
+        MPI_Unpack(send_buf[myrank], recv_size[myrank], &position, write_buf, 1, self_recv_type,
+                   MPI_COMM_SELF);
     }
 
-    for (i = 0; i < nprocs_recv; i++)
+    for (i = 0; i < num_rtypes; i++)
         MPI_Type_free(recv_types + i);
     ADIOI_Free(recv_types);
+
+    if (self_recv_type != MPI_DATATYPE_NULL)
+        MPI_Type_free(&self_recv_type);
 
 #ifdef MPI_STATUSES_IGNORE
     statuses = MPI_STATUSES_IGNORE;
 #else
-    if (fd->atomicity) {
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
-        statuses = (MPI_Status *) ADIOI_Malloc((nprocs_send + 1) * sizeof(MPI_Status));
-        /* +1 to avoid a 0-size malloc */
-    } else {
-        statuses = (MPI_Status *) ADIOI_Malloc((nprocs_send + nprocs_recv + 1) *
-                                               sizeof(MPI_Status));
-        /* +1 to avoid a 0-size malloc */
-    }
+    statuses = (MPI_Status *) ADIOI_Malloc((nreqs + 1) * sizeof(MPI_Status));
+    /* +1 to avoid a 0-size malloc */
 #endif
 
 #ifdef NEEDS_MPI_TEST
     i = 0;
-    if (fd->atomicity) {
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
-        while (!i)
-            MPI_Testall(nprocs_send, send_req, &i, statuses);
-    } else {
-        while (!i)
-            MPI_Testall(nprocs_send + nprocs_recv, requests, &i, statuses);
-    }
+    while (!i)
+        MPI_Testall(nreqs, requests, &i, statuses);
 #else
-    if (fd->atomicity)
-        /* bug fix from Wei-keng Liao and Kenin Coloma */
-        MPI_Waitall(nprocs_send, send_req, statuses);
-    else
-        MPI_Waitall(nprocs_send + nprocs_recv, requests, statuses);
+    MPI_Waitall(nreqs, requests, statuses);
 #endif
 
 #ifdef AGGREGATION_PROFILE
@@ -888,10 +890,9 @@ void ADIOI_Fill_send_buffer(ADIO_File fd, void *buf, ADIOI_Flatlist_node
                                      (unsigned) ((ADIO_Offset) curr_to_proc[p] + size));
                         curr_to_proc[p] += size;
                     ADIOI_BUF_COPY}
-                    if (send_buf_idx[p] == send_size[p]) {
+                    if (send_buf_idx[p] == send_size[p] && p != myrank) {
                         MPI_Isend(send_buf[p], send_size[p], MPI_BYTE, p,
-                                  ADIOI_COLL_TAG(p, iter), fd->comm, requests + jj);
-                        jj++;
+                                  ADIOI_COLL_TAG(p, iter), fd->comm, &requests[jj++]);
                     }
                 } else {
                     ADIOI_Assert((curr_to_proc[p] + len) ==

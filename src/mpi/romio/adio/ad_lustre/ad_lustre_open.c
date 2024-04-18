@@ -21,10 +21,7 @@ void ADIOI_LUSTRE_Open(ADIO_File fd, int *error_code)
     char *value;
     ADIO_Offset str_factor = -1, str_unit = 0, start_iodev = -1;
     size_t value_sz = (MPI_MAX_INFO_VAL + 1) * sizeof(char);
-
-#if defined(MPICH) || !defined(PRINT_ERR_MSG)
     static char myname[] = "ADIOI_LUSTRE_OPEN";
-#endif
 
     MPI_Comm_rank(fd->comm, &myrank);
 
