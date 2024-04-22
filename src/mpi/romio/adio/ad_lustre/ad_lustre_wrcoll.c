@@ -1290,11 +1290,16 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
                                             Statistic *stat_ptr) {
     MPI_Request *reqs  = NULL;
     int reqs_count     = 0;
-    int max_reqs_count = fd->is_agg ? fd->hints->cb_nodes : 0;
-    max_reqs_count += nprocs;
+    int max_reqs_count = fd->is_agg ? nprocs : 0;
+    max_reqs_count += fd->hints->cb_nodes;
+
+    int myrank = -1;
+    MPI_Comm_rank (fd->comm, &myrank);
+    if (myrank == 0) {
+        printf("Inside ADIOI_post_send_recv_reqs_wait\n");
+    }
 
     reqs = (MPI_Request *)ADIOI_Malloc (max_reqs_count * sizeof (MPI_Request));
-
     for (int i = 0; i < fd->hints->cb_nodes; i++) {
         if (send_infos[i].count > 0) {
             int dset = fd->hints->ranklist[i];
@@ -1656,7 +1661,10 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     if (partition_group_size > 0) {
         num_groups = fd->hints->cb_nodes / fd->hints->striping_factor;
     }
-
+    if (myrank == 0) {
+        printf("DEBUG: num_groups = %d\n", num_groups);
+        printf("DEBUG: partition_group_size = %lld\n", partition_group_size);
+    }
     if (partition_group_size > 0 && !buftype_is_contig) {
         nbs = (Non_contig_buf_sta *) ADIOI_Calloc(num_groups, sizeof(Non_contig_buf_sta));
         nbs[0].flat_buf_sz = flat_buf->blocklens[0];
@@ -2127,6 +2135,8 @@ static void ADIOI_bs_agg_cache_sr_req(SR_info *sr_infos, int size, void* buf, in
     sr_infos[target_proc].size_ptr[idx] = size;
     MPI_Get_address(buf, &(sr_infos[target_proc].buf_pos_ptr[idx]));
     sr_infos[target_proc].count++;
+    int myrank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
 }
 
 static void ADIOI_LUSTRE_W_Exchange_data(
