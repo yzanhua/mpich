@@ -2222,6 +2222,11 @@ static void ADIOI_LUSTRE_W_Exchange_data(
         if (send_size[i])
             nprocs_send++;
     }
+    if (myrank == 0) {
+        printf("DEBUG: buftype_is_contig = %d\n", buftype_is_contig);
+        printf("DEBUG: total_send_size_iter = %lld, to self = %d, iter=%d\n", total_send_size_iter, send_size[0], iter);
+        printf("DEBUG: total_receive_size_iter = %d, from self = %d, iter=%d\n", sum_recv, recv_size[0], iter);
+    }
 
     /* determine whether checking holes is necessary */
     check_hole = 1;
