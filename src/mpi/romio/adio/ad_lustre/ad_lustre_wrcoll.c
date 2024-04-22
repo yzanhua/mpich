@@ -1326,10 +1326,6 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
         }
     }
 
-    if (myrank == 0) {
-        printf("Inside ADIOI_post_send_recv_reqs_wait, iter=%d, reqs_count=%d\n", iter, reqs_count);
-    }
-
     // wait
     if (reqs_count > 0) {
         stat_ptr->wait_time -= MPI_Wtime ();
@@ -1662,10 +1658,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     if (partition_group_size > 0) {
         num_groups = fd->hints->cb_nodes / fd->hints->striping_factor;
     }
-    if (myrank == 0) {
-        printf("DEBUG: num_groups = %d\n", num_groups);
-        printf("DEBUG: partition_group_size = %lld\n", partition_group_size);
-    }
+
     if (partition_group_size > 0 && !buftype_is_contig) {
         nbs = (Non_contig_buf_sta *) ADIOI_Calloc(num_groups, sizeof(Non_contig_buf_sta));
         nbs[0].flat_buf_sz = flat_buf->blocklens[0];
@@ -1737,9 +1730,10 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                     ADIO_Offset check_st = -1, check_ed = -1;
                     if (partition_group_size > 0) {
                         check_st = min_st_loc;
-                        check_st += grp_idx * partition_group_size * fd->hints->striping_unit;
-                        check_st += m * fd->hints->striping_factor * fd->hints->striping_unit;
-                        check_ed = check_st + fd->hints->striping_unit * fd->hints->striping_factor;
+                        check_st += (ADIO_Offset)grp_idx * partition_group_size * (ADIO_Offset)fd->hints->striping_unit;
+                        check_st += (ADIO_Offset)m * (ADIO_Offset)fd->hints->striping_factor * (ADIO_Offset)fd->hints->striping_unit;
+                        check_ed = check_st + (ADIO_Offset)fd->hints->striping_unit * (ADIO_Offset)fd->hints->striping_factor;
+
                     } else {
                         check_st = min_st_loc + step_size * m;
                         check_ed = min_st_loc + step_size * (m + 1);
@@ -1769,9 +1763,9 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                     ADIO_Offset check_st = -1, check_ed = -1;
                     if (partition_group_size > 0) {
                         check_st = min_st_loc;
-                        check_st += grp_idx * partition_group_size * fd->hints->striping_unit;
-                        check_st += m * fd->hints->striping_factor * fd->hints->striping_unit;
-                        check_ed = check_st + fd->hints->striping_unit * fd->hints->striping_factor;
+                        check_st += (ADIO_Offset)grp_idx * partition_group_size * (ADIO_Offset)fd->hints->striping_unit;
+                        check_st += (ADIO_Offset)m * (ADIO_Offset)fd->hints->striping_factor * (ADIO_Offset)fd->hints->striping_unit;
+                        check_ed = check_st + (ADIO_Offset)fd->hints->striping_unit * (ADIO_Offset)fd->hints->striping_factor;
                     } else {
                         check_st = min_st_loc + step_size * m;
                         check_ed = min_st_loc + step_size * (m + 1);
@@ -2221,11 +2215,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
         total_send_size_iter += send_size[i];
         if (send_size[i])
             nprocs_send++;
-    }
-    if (myrank == 0) {
-        printf("DEBUG: buftype_is_contig = %d\n", buftype_is_contig);
-        printf("DEBUG: total_send_size_iter = %lld, to self = %d, iter=%d\n", total_send_size_iter, send_size[0], iter);
-        printf("DEBUG: total_receive_size_iter = %d, from self = %d, iter=%d\n", sum_recv, recv_size[0], iter);
     }
 
     /* determine whether checking holes is necessary */
