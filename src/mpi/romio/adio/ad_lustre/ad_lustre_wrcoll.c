@@ -1295,9 +1295,6 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
 
     int myrank = -1;
     MPI_Comm_rank (fd->comm, &myrank);
-    if (myrank == 0) {
-        printf("Inside ADIOI_post_send_recv_reqs_wait\n");
-    }
 
     reqs = (MPI_Request *)ADIOI_Malloc (max_reqs_count * sizeof (MPI_Request));
     for (int i = 0; i < fd->hints->cb_nodes; i++) {
@@ -1327,6 +1324,10 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
                 MPI_Type_free (&newtype);
             }
         }
+    }
+
+    if (myrank == 0) {
+        printf("Inside ADIOI_post_send_recv_reqs_wait, iter=%d, reqs_count=%d\n", iter, reqs_count);
     }
 
     // wait
