@@ -64,6 +64,15 @@ typedef struct {
 } SR_info;
 
 typedef struct {
+    int n_buftypes;
+    int flat_buf_idx;
+    int flat_buf_sz;
+    int fileview_indx;
+    ADIO_Offset current_off;
+    ADIO_Offset user_buf_idx;
+} Non_contig_buf_sta;
+
+typedef struct {
     double total_two_phase_time;
     double io_time;
     double comm_time;
@@ -75,8 +84,8 @@ typedef struct {
     size_t* send_size_per_round;
     int* num_sender_processes_per_round_per_agg;
     int* num_sender_nodes_per_round_per_agg;
-    int num_wait_all_group;
-    int* num_wait_all_per_group;
+    int num_wait_all;
+    int num_reqs;
     int use_ind_io;
     int use_one_side_io;
     int num_procs_per_node;
@@ -94,6 +103,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                         ADIO_Offset max_end_loc,
                                         int contig_access_count,
                                         int my_aggr_idx,
+                                        const ADIO_Offset partition_group_size,
                                         ADIO_Offset **buf_idx,
                                         int *error_code,
                                         Statistic *stat);
@@ -114,6 +124,9 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, const void *buf,
                                           int my_aggr_idx,
                                           int iter,
                                           ADIO_Offset buftype_extent,
+                                          ADIO_Offset *curr_off,
+                                          const ADIO_Offset partition_group_size,
+                                          const ADIO_Offset min_st_loc,
                                           SR_info *send_infos);
 static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          char *write_buf,
@@ -138,6 +151,8 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          const ADIOI_Access *others_req,
                                          int iter,
                                          ADIO_Offset buftype_extent,
+                                         const ADIO_Offset partition_group_size,
+                                         const ADIO_Offset min_st_loc,
                                          const ADIO_Offset * buf_idx,
                                          off_len_list *srt_off_len,
                                          MPI_Request *reqs,
@@ -145,6 +160,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          int *error_code,
                                          SR_info             *send_infos,
                                          SR_info             *recv_infos,
+                                         Non_contig_buf_sta  *nbs,
                                          Statistic *stat_ptr);
 void ADIOI_Heap_merge(ADIOI_Access * others_req, int *count,
                       ADIO_Offset * srt_off, int *srt_len, int *start_pos,
@@ -174,6 +190,8 @@ void ADIOI_LUSTRE_Calc_my_req(
         const ADIO_Offset *offset_list, /* IN: [contig_access_count] */
         const ADIO_Offset *len_list,    /* IN: [contig_access_count] */
         int contig_access_count,
+        const ADIO_Offset partition_group_size,
+        const ADIO_Offset min_st_loc,
         int *count_my_req_aggrs_ptr,    /* OUT: */
         int **count_my_req_per_aggr_ptr,/* OUT: [cb_nodes] */
         ADIOI_Access **my_req_ptr,      /* OUT: [cb_nodes] */
@@ -222,7 +240,7 @@ void ADIOI_LUSTRE_Calc_my_req(
          * the 'aggr'th element of array ranklist[], rather than the
          * aggregator's MPI rank ID in fd->comm.
          */
-        aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
+        aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, partition_group_size, min_st_loc);
         aggr_ranks[i] = aggr;          /* first aggregator ID of this request */
         avail_lens[i] = avail_len;     /* length covered, may be < len_list[i] */
 #ifdef WKL_DEBUG
@@ -242,7 +260,7 @@ assert(rem_len >= 0);
         while (rem_len > 0) {
             off += avail_len;    /* move forward to first remaining byte */
             avail_len = rem_len; /* save remaining size, pass to calc */
-            aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
+            aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, partition_group_size, min_st_loc);
             count_my_req_per_aggr[aggr]++;
             nelems++;
             rem_len -= avail_len;       /* reduce remaining length by amount from fd */
@@ -324,7 +342,7 @@ assert(aggr >= 0 && aggr <= cb_nodes);
         while (rem_len != 0) {
             off += avail_len;
             avail_len = rem_len;
-            aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len);
+            aggr = ADIOI_LUSTRE_Calc_aggregator(fd, off, &avail_len, partition_group_size, min_st_loc);
 #ifdef WKL_DEBUG
 assert(aggr >= 0 && aggr <= cb_nodes);
 #endif
@@ -677,11 +695,10 @@ static void print_array(char* msg, int it_end, int* array_ptr_int, size_t* array
 }
 static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs, ADIO_File fd) {
     // print time
-    // double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
     stat_ptr->comm_time = stat_ptr->total_two_phase_time - stat_ptr->io_time;
     int num_nodes = nprocs / stat_ptr->num_procs_per_node;
-    size_t struct_size = sizeof(double) * 4 + sizeof(int) * 3;
-    struct_size += stat_ptr->rounds * sizeof(int) * 4;
+    size_t struct_size = sizeof(double) * 4 + sizeof(int) * 4;
+    struct_size += stat_ptr->rounds * sizeof(int) * 3;
     struct_size += stat_ptr->rounds * num_nodes * sizeof(int);
     struct_size += stat_ptr->rounds * sizeof(size_t);
 
@@ -692,22 +709,23 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     ((double*) send_buf)[3] = stat_ptr->wait_time;
     int* int_buf = (int*)((double*) send_buf + 4);
     int_buf[0] = stat_ptr->num_message_per_agg;
-    int_buf[1] = stat_ptr->num_wait_all_group;
+    int_buf[1] = stat_ptr->num_wait_all;
     int_buf[2] = fd->is_agg;
-    int* array_buf1 = (int*)(int_buf + 3);
+    int_buf[3] = stat_ptr->num_reqs;
+    int* array_buf1 = (int*)(int_buf + 4);
     int* array_buf2 = array_buf1 + stat_ptr->rounds;
     int* array_buf3 = array_buf2 + stat_ptr->rounds;
     int* array_buf4 = array_buf3 + stat_ptr->rounds;
-    int* array_buf5 = array_buf4 + stat_ptr->rounds * num_nodes;
+    // int* array_buf5 = array_buf4 + stat_ptr->rounds * num_nodes;
     if (fd->is_agg){
         memcpy(array_buf1, stat_ptr->num_message_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf3, stat_ptr->num_sender_processes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf4, stat_ptr->num_sender_nodes_per_round_per_agg, stat_ptr->rounds * num_nodes * sizeof(int));
     }
     memcpy(array_buf2, stat_ptr->num_receiver_per_round, stat_ptr->rounds * sizeof(int));
-    memcpy(array_buf5, stat_ptr->num_wait_all_per_group, stat_ptr->rounds * sizeof(int));
+    // memcpy(array_buf5, stat_ptr->num_reqs, stat_ptr->rounds * sizeof(int));
 
-    size_t* array_buf6 = (size_t*)(array_buf5 + stat_ptr->rounds);
+    size_t* array_buf6 = (size_t*)(array_buf4 + stat_ptr->rounds * num_nodes);
     memcpy(array_buf6, stat_ptr->send_size_per_round, stat_ptr->rounds * sizeof(size_t));
 
     char* recv_buf = NULL;
@@ -769,7 +787,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             printf("\tnum_message_per_agg: %d//\n", min_val_int);
         }
 
-        // num_wait_all_group (agg)
+        // num_wait_all_calls (agg)
         min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
         for (int i = 0; i < nprocs; i++) {
             int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
@@ -781,18 +799,25 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
                 cnt++;
             }
         }
-        if (min_val_int != max_val_int) {
-            printf("\tnum_wait_all_calls (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
-        } else {
-            printf("\tnum_wait_all_calls (agg): %d//\n", min_val_int);
+        printf("\tnum_wait_all_calls (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
+
+        // num_reqs (agg)
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
+            int is_agg = int_recv_ptr[2];
+            if (is_agg) {
+                if (int_recv_ptr[1] < min_val_int) min_val_int = int_recv_ptr[3];
+                if (int_recv_ptr[1] > max_val_int) max_val_int = int_recv_ptr[3];
+                total_val_int += int_recv_ptr[3];
+                cnt++;
+            }
         }
+        printf("\tnum_reqs (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
 
-        if (max_val_int > 0)
-            print_across_proc("\t\tnum_reqs_per_wait_all (agg): ", min_val_int, nprocs, 1, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1, num_nodes);
-        print_across_proc("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 0, stat_ptr, 1, num_nodes);
-        print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 2, stat_ptr, 1, num_nodes);
+        print_across_proc("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 4, 0, stat_ptr, 1, num_nodes);
+        print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 4, 2, stat_ptr, 1, num_nodes);
 
-        // print_across_proc("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 3, stat_ptr, 1, num_nodes);
         int *temp_array_nodes = (int*) malloc(num_nodes * sizeof(int));
         int *temp_array_rounds = (int*) malloc(stat_ptr->rounds * sizeof(int));
         for (int j = 0; j < stat_ptr->rounds; j++) {
@@ -835,15 +860,25 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
                 cnt++;
             }
         }
-        if (min_val_int != max_val_int) {
-            printf("\tnum_wait_all_calls (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
-        } else {
-            printf("\tnum_wait_all_calls (non agg): %d//\n", min_val_int);
+        printf("\tnum_wait_all_calls (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
+
+        // num_reqs (non agg)
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
+            int is_agg = int_recv_ptr[2];
+            if (!is_agg) {
+                if (int_recv_ptr[1] < min_val_int) min_val_int = int_recv_ptr[3];
+                if (int_recv_ptr[1] > max_val_int) max_val_int = int_recv_ptr[3];
+                total_val_int += int_recv_ptr[3];
+                cnt++;
+            }
         }
-        if (max_val_int > 0)
-            print_across_proc("\t\tnum_reqs_per_wait_all (non agg): ", min_val_int, nprocs, 0, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1, num_nodes);
-        print_across_proc("all processes counters\n\tnum_receiver_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 1, stat_ptr, 1, num_nodes);
-        print_across_proc("\tsend_size_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 5, stat_ptr, 0, num_nodes);
+        printf("\tnum_reqs (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
+
+
+        print_across_proc("all processes counters\n\tnum_receiver_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 4, 1, stat_ptr, 1, num_nodes);
+        print_across_proc("\tsend_size_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 4, 4, stat_ptr, 0, num_nodes);
         int agg_printed = 0;
         int non_agg_printed = 0;
 
@@ -875,6 +910,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             printf("\tcomm_time: %f\n", recv_ptr[2]);
             printf("\tnum_message_per_agg: %d\n", int_recv_ptr[0]);
             printf("\tnum_wait_all_calls: %d\n", int_recv_ptr[1]);
+            printf("\tnum_reqs: %d\n", int_recv_ptr[3]);
             printf("\tis_agg: %d\n", int_recv_ptr[2]);
             if (int_recv_ptr[2]) {
                 print_array("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, array_recv_ptr1, NULL);
@@ -905,11 +941,38 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     if (stat_ptr->num_sender_nodes_per_round_per_agg != NULL) {
         ADIOI_Free(stat_ptr->num_sender_nodes_per_round_per_agg);
     }
-    if (stat_ptr->num_wait_all_per_group != NULL) {
-        ADIOI_Free(stat_ptr->num_wait_all_per_group);
-    }
 }
 
+static void ADIOI_set_group_stylic(ADIO_File fd, ADIO_Offset min_st_loc, ADIO_Offset max_end_loc, ADIO_Offset *partition_group_size_ptr) {
+    // init
+    int num_groups = -1;
+    *partition_group_size_ptr = -1;
+
+    // special cases
+    if (min_st_loc == -1 || max_end_loc == -1) {
+        return;
+    }
+
+    if (fd->hints->cb_nodes % fd->hints->striping_factor == 0) {
+        num_groups = fd->hints->cb_nodes / fd->hints->striping_factor;
+    }
+
+    if (num_groups < 2) {
+        return;
+    }
+
+    min_st_loc -= min_st_loc % (ADIO_Offset) fd->hints->striping_unit;
+    max_end_loc += (ADIO_Offset) fd->hints->striping_unit;
+    max_end_loc -= max_end_loc % (ADIO_Offset) fd->hints->striping_unit;
+    ADIO_Offset total_stripes = ((max_end_loc - min_st_loc) / (ADIO_Offset) fd->hints->striping_unit);
+    if (total_stripes <= fd->hints->cb_nodes) {
+        return;
+    }
+    *partition_group_size_ptr = total_stripes / num_groups;
+    if (total_stripes % num_groups != 0) {
+        (*partition_group_size_ptr)++;
+    }
+}
 void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count,
                                    MPI_Datatype datatype,
                                    int file_ptr_type, ADIO_Offset offset,
@@ -932,6 +995,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
     MPI_Comm_rank(fd->comm, &myrank);
 
     orig_fp = fd->fp_ind;
+    ADIO_Offset partition_group_size = -1; // init value must be -1;
 
     // init stat to 0;
     Statistic stat = {.total_two_phase_time                   = 0.0,
@@ -943,8 +1007,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
                       .send_size_per_round                    = NULL,
                       .num_sender_processes_per_round_per_agg = NULL,
                       .num_sender_nodes_per_round_per_agg     = NULL,
-                      .num_wait_all_group                     = 0,
-                      .num_wait_all_per_group                 = NULL,
+                      .num_wait_all                           = 0,
+                      .num_reqs                               = 0,
                       .use_ind_io                             = 0,
                       .use_one_side_io                        = 0,
                       .num_procs_per_node                     = 128};
@@ -1087,6 +1151,10 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
         int count_others_req_procs, *count_others_req_per_proc;
         ADIO_Offset **buf_idx = NULL;
 
+        // set group
+        min_st_loc -= min_st_loc % (ADIO_Offset) fd->hints->striping_unit;
+        ADIOI_set_group_stylic(fd, min_st_loc, max_end_loc, &partition_group_size);
+
         /* Calculate the portions of this process's write requests that fall
          * into the file domains of each I/O aggregator. No inter-process
          * communication is needed.
@@ -1096,6 +1164,7 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
          * have this rank's write requests>
          */
         ADIOI_LUSTRE_Calc_my_req(fd, offset_list, len_list, contig_access_count,
+                                partition_group_size, min_st_loc,
                                  &count_my_req_aggr, &count_my_req_per_aggr,
                                  &my_req, buftype_is_contig, &buf_idx);
 
@@ -1148,7 +1217,7 @@ else
         ADIOI_LUSTRE_Exch_and_write(fd, buf, datatype, others_req, my_req,
                                     offset_list, len_list, min_st_loc,
                                     max_end_loc, contig_access_count,
-                                    my_aggr_idx, buf_idx, error_code, &stat);
+                                    my_aggr_idx, partition_group_size, buf_idx, error_code, &stat);
 
         /* free all memory allocated */
         ADIOI_Free_others_req(nprocs, count_others_req_per_proc, others_req);
@@ -1260,8 +1329,8 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
         stat_ptr->wait_time -= MPI_Wtime ();
         AD_LUSTRE_WAITALL (reqs_count, reqs);
         stat_ptr->wait_time += MPI_Wtime ();
-        stat_ptr->num_wait_all_per_group[stat_ptr->num_wait_all_group] = reqs_count;
-        stat_ptr->num_wait_all_group++;
+        stat_ptr->num_reqs += reqs_count;
+        stat_ptr->num_wait_all++;
     }
 
     // clear send_infos, recv_infos
@@ -1273,6 +1342,42 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
     // clear send_reqs, recv_reqs
     if (reqs != NULL) { ADIOI_Free (reqs); }
 }
+
+static void update_non_contig_sta (ADIO_Offset size,
+                                   Non_contig_buf_sta *nbs,  // Noncontig Buf States (NBS)
+                                   const ADIOI_Flatlist_node *flat_buf,
+                                   const ADIO_Offset *len_list,
+                                   const ADIO_Offset buftype_extent) {
+    ADIO_Offset size_bkp = size;
+    while (size) {
+        int size_in_buf = MPL_MIN (size, nbs->flat_buf_sz);
+        nbs->user_buf_idx += size_in_buf;
+        nbs->flat_buf_sz -= size_in_buf;
+        if (nbs->flat_buf_sz == 0) { /* move on to next flat_buf segment */
+            if (nbs->flat_buf_idx < (flat_buf->count - 1))
+                (nbs->flat_buf_idx)++;
+            else {
+                nbs->flat_buf_idx = 0;
+                nbs->n_buftypes++;
+            }
+            nbs->user_buf_idx = flat_buf->indices[nbs->flat_buf_idx] +
+                                (ADIO_Offset)(nbs->n_buftypes) * buftype_extent;
+            nbs->flat_buf_sz = flat_buf->blocklens[nbs->flat_buf_idx];
+        }
+        size -= size_in_buf;
+    }
+    size = size_bkp + nbs->current_off;
+    while (size) {
+        if (size >= len_list[nbs->fileview_indx]) {
+            size -= len_list[nbs->fileview_indx];
+            (nbs->fileview_indx)++;
+        } else {
+            nbs->current_off = size;
+            size             = 0;
+        }
+    }
+}
+
 /* If successful, error_code is set to MPI_SUCCESS.  Otherwise an error code is
  * created and returned in error_code.
  */
@@ -1287,6 +1392,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                         ADIO_Offset max_end_loc,
                                         int contig_access_count,
                                         int my_aggr_idx,
+                                        const ADIO_Offset partition_group_size,
                                         ADIO_Offset **buf_idx,
                                         int *error_code,
                                         Statistic *stat_ptr)
@@ -1317,6 +1423,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     ADIO_Offset *this_buf_idx, buftype_extent;
     ADIOI_Flatlist_node *flat_buf = NULL;
     off_len_list *srt_off_len = NULL;
+    Non_contig_buf_sta *nbs = NULL;
 
     SR_info *send_infos = NULL, *recv_infos = NULL;
 
@@ -1349,17 +1456,22 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     ntimes = (max_end_loc - min_st_loc + 1) / step_size;
     if ((max_end_loc - min_st_loc + 1) % step_size)
         ntimes++;
+    if (partition_group_size > 0) {
+        ntimes = partition_group_size / fd->hints->striping_factor;
+        if (partition_group_size % fd->hints->striping_factor != 0) {
+            ntimes++;
+        }
+    }
     stat_ptr->rounds = ntimes;
     int num_nodes = nprocs / stat_ptr->num_procs_per_node;
+    if (num_nodes < 1) num_nodes = 1;
     if (fd->is_agg) {
-        // ADIOI_Calloc((nprocs + 2 * cb_nodes), sizeof(int));
         stat_ptr->num_message_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
         stat_ptr->num_sender_processes_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
         stat_ptr->num_sender_nodes_per_round_per_agg = (int *) ADIOI_Calloc(ntimes * num_nodes, sizeof(int));
     }
     stat_ptr->num_receiver_per_round = (int *) ADIOI_Calloc(ntimes, sizeof(int));
     stat_ptr->send_size_per_round = (size_t *) ADIOI_Calloc(ntimes, sizeof(size_t));
-    stat_ptr->num_wait_all_per_group = (int *) ADIOI_Calloc(ntimes, sizeof(int));
 
     /* off_list[m] is the starting file offset of this process's write region
      * in iteration m (file domain of iteration m). This offset may not be
@@ -1368,12 +1480,21 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
      */
     off_list = (ADIO_Offset *) ADIOI_Malloc(ntimes * sizeof(ADIO_Offset));
     end_loc = -1;
+
     for (m = 0; m < ntimes; m++)
         off_list[m] = max_end_loc;
     for (i = 0; i < nprocs; i++) {
         for (j = 0; j < others_req[i].count; j++) {
             req_off = others_req[i].offsets[j];
-            m = (int) ((req_off - min_st_loc) / step_size);
+            if (partition_group_size > 0) {
+                ADIO_Offset temp = req_off / striping_unit - min_st_loc / striping_unit;
+                temp = temp % partition_group_size;
+                temp = temp / fd->hints->striping_factor;
+                m = (int) temp;
+            } else {
+                m = (int) ((req_off - min_st_loc) / step_size);
+            }
+
             off_list[m] = MPL_MIN(off_list[m], req_off);
             end_loc = MPL_MAX(end_loc, (others_req[i].offsets[j] + others_req[i].lens[j] - 1));
         }
@@ -1531,6 +1652,32 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     int flat_buf_idx = 0;
     int flat_buf_sz = (buftype_is_contig) ? 0 : flat_buf->blocklens[0];
 
+    int num_groups = 1;
+    if (partition_group_size > 0) {
+        num_groups = fd->hints->cb_nodes / fd->hints->striping_factor;
+    }
+
+    if (partition_group_size > 0 && !buftype_is_contig) {
+        nbs = (Non_contig_buf_sta *) ADIOI_Calloc(num_groups, sizeof(Non_contig_buf_sta));
+        nbs[0].flat_buf_sz = flat_buf->blocklens[0];
+        nbs[0].user_buf_idx = flat_buf->indices[nbs[0].flat_buf_idx] + flat_buf->blocklens[nbs[0].flat_buf_idx] - nbs[0].flat_buf_sz;
+        ADIO_Offset *total_send_sizes_per_group = (ADIO_Offset *) ADIOI_Calloc(num_groups, sizeof(ADIO_Offset));
+        for (i = 0; i < cb_nodes; i++) {
+            int group = i / fd->hints->striping_factor;
+            for (j = 0; j < my_req[i].count; j++) {
+                total_send_sizes_per_group[group] += my_req[i].lens[j];
+            }
+        }
+        for (i = 1; i < num_groups; i++) {
+            // copy noncontig_buf_states[i-1] to noncontig_buf_states[i]
+            memcpy(&nbs[i], &nbs[i-1], sizeof(Non_contig_buf_sta));
+            update_non_contig_sta(total_send_sizes_per_group[i-1], &nbs[i], flat_buf, len_list, buftype_extent);
+        }
+        if (total_send_sizes_per_group != NULL) {
+            ADIOI_Free(total_send_sizes_per_group);
+        }
+    }
+
     for (m = 0; m < ntimes; m++) {
         int real_size;
         ADIO_Offset real_off;
@@ -1575,20 +1722,30 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
          */
         for (i = 0; i < cb_nodes; i++) {
             if (my_req[i].count) { /* No. this rank's off-len pairs to be sent to aggregetor i */
+                if (send_curr_offlen_ptr[i] >= my_req[i].count) { continue; }
+                if (buftype_is_contig) { this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]]; }
+                for (int grp_idx = 0; grp_idx < num_groups; grp_idx++) {
+                    ADIO_Offset check_st = -1, check_ed = -1;
+                    if (partition_group_size > 0) {
+                        check_st = min_st_loc;
+                        check_st += grp_idx * partition_group_size * fd->hints->striping_unit;
+                        check_st += m * fd->hints->striping_factor * fd->hints->striping_unit;
+                        check_ed = check_st + fd->hints->striping_unit * fd->hints->striping_factor;
+                    } else {
+                        check_st = min_st_loc + step_size * m;
+                        check_ed = min_st_loc + step_size * (m + 1);
+                    }
 
-                if (send_curr_offlen_ptr[i] == my_req[i].count)
-                    continue; /* done with aggregator i */
-
-                if (buftype_is_contig)
-                    this_buf_idx[i] = buf_idx[i][send_curr_offlen_ptr[i]];
-                for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
-                    if (my_req[i].offsets[j] < iter_end_off)
-                        send_size[i] += my_req[i].lens[j];
-                    else
-                        break;
+                    for (j = send_curr_offlen_ptr[i]; j < my_req[i].count; j++) {
+                        if (my_req[i].offsets[j] >= check_st && my_req[i].offsets[j] < check_ed)
+                            send_size[i] += my_req[i].lens[j];
+                        else
+                            break;
+                    }
+                    send_curr_offlen_ptr[i] = j;
                 }
-                send_curr_offlen_ptr[i] = j;
-                stat_ptr->num_receiver_per_round[m]++;
+                if (send_size[i] > 0)
+                    stat_ptr->num_receiver_per_round[m]++;
                 stat_ptr->send_size_per_round[m] += send_size[i];
             }
         }
@@ -1599,30 +1756,43 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         for (i = 0; i < nprocs; i++) {
             if (others_req[i].count) {
                 recv_start_pos[ibuf][i] = recv_curr_offlen_ptr[i];
-                for (j = recv_curr_offlen_ptr[i]; j < others_req[i].count; j++) {
-                    if (others_req[i].offsets[j] < iter_end_off) {
-                        recv_count[ibuf][i]++;
-                        others_req[i].mem_ptrs[j] =
-                            (MPI_Aint) (others_req[i].offsets[j] - real_off);
-                        recv_size[ibuf][i] += others_req[i].lens[j];
-                        stat_ptr->num_message_per_agg++;
-                        stat_ptr->num_message_per_round_per_agg[m]++;
-                        if (i > process_recorded) {
-                            process_recorded = i;
-                            stat_ptr->num_sender_processes_per_round_per_agg[m]++;
-                        }
-                        int node_id = i / stat_ptr->num_procs_per_node;
-                        if (node_id > nodes_recorded) {
-                            nodes_recorded = node_id;
-                            stat_ptr->num_sender_nodes_per_round_per_agg[m * num_nodes + node_id]++;
-                        }
+                for (int grp_idx = 0; grp_idx < num_groups; grp_idx++) {
+                    ADIO_Offset check_st = -1, check_ed = -1;
+                    if (partition_group_size > 0) {
+                        check_st = min_st_loc;
+                        check_st += grp_idx * partition_group_size * fd->hints->striping_unit;
+                        check_st += m * fd->hints->striping_factor * fd->hints->striping_unit;
+                        check_ed = check_st + fd->hints->striping_unit * fd->hints->striping_factor;
                     } else {
-                        break;
+                        check_st = min_st_loc + step_size * m;
+                        check_ed = min_st_loc + step_size * (m + 1);
                     }
+                    for (j = recv_curr_offlen_ptr[i]; j < others_req[i].count; j++) {
+                        if (others_req[i].offsets[j] >= check_st && others_req[i].offsets[j] < check_ed) {
+                            recv_count[ibuf][i]++;
+                            others_req[i].mem_ptrs[j] =
+                                (MPI_Aint)(others_req[i].offsets[j] - real_off);
+                            recv_size[ibuf][i] += others_req[i].lens[j];
+
+                            stat_ptr->num_message_per_agg++;
+                            stat_ptr->num_message_per_round_per_agg[m]++;
+                            if (i > process_recorded) {
+                                process_recorded = i;
+                                stat_ptr->num_sender_processes_per_round_per_agg[m]++;
+                            }
+                            int node_id = i / stat_ptr->num_procs_per_node;
+                            if (node_id > nodes_recorded) {
+                                nodes_recorded = node_id;
+                                stat_ptr->num_sender_nodes_per_round_per_agg[m * num_nodes + node_id]++;
+                            }
+                        } else
+                            break;
+                    }
+                    recv_curr_offlen_ptr[i] = j;
                 }
-                recv_curr_offlen_ptr[i] = j;
             }
         }
+
         iter_end_off += step_size;
 
         /* redistribute (exchange) this process's write requests to I/O
@@ -1656,6 +1826,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                      others_req,           /* IN: changed each round */
                                      m,
                                      buftype_extent,
+                                     partition_group_size,
+                                     min_st_loc,
                                      this_buf_idx,         /* IN: changed each round */
                                      &srt_off_len[ibuf],   /* OUT: list of write request off-len pairs */
                                      reqs + batch_nreqs,   /* OUT: nonblocking recv+send request IDs */
@@ -1663,6 +1835,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                      error_code,
                                      send_infos,
                                      recv_infos,
+                                     nbs,
                                      stat_ptr);
 
         if (*error_code != MPI_SUCCESS)
@@ -1788,6 +1961,8 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
   over:
     ADIOI_Free(reqs);
     ADIOI_Free(nreqs);
+    if (nbs != NULL)
+        ADIOI_Free(nbs);
     if (srt_off_len)
         ADIOI_Free(srt_off_len);
     if (write_buf != NULL) {
@@ -1818,7 +1993,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         ADIOI_Free(send_infos);
     }
     if (recv_infos != NULL) {
-        for (i = 0; i < cb_nodes; i++) {
+        for (i = 0; i < nprocs; i++) {
             ADIOI_Free(recv_infos[i].size_ptr);
             ADIOI_Free(recv_infos[i].buf_pos_ptr);
         }
@@ -1949,9 +2124,6 @@ void heap_merge(const ADIOI_Access * others_req, const int *count, ADIO_Offset *
 }
 static void ADIOI_bs_agg_cache_sr_req(SR_info *sr_infos, int size, void* buf, int target_proc, int is_send) {
     int idx = sr_infos[target_proc].count;
-    // int myrank;
-    // MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
-    // printf("DEBUG %d is_send=%d target_proc=%d idx=%d, size_ptr=%p\n", myrank, is_send, target_proc, idx, sr_infos[target_proc].size_ptr);
     sr_infos[target_proc].size_ptr[idx] = size;
     MPI_Get_address(buf, &(sr_infos[target_proc].buf_pos_ptr[idx]));
     sr_infos[target_proc].count++;
@@ -1982,6 +2154,8 @@ static void ADIOI_LUSTRE_W_Exchange_data(
       const ADIOI_Access        *others_req,   /* others_req[i] is rank i's write requests fall into this rank's file domain */
             int                  iter,         /* round ID */
             ADIO_Offset          buftype_extent,
+      const ADIO_Offset          partition_group_size,
+      const ADIO_Offset          min_st_loc,
       const ADIO_Offset         *buf_idx,      /* indices to user buffer for sending this rank's write data to aggregator i */
             off_len_list        *srt_off_len,  /* OUT: list of writes by this rank in this round */
             MPI_Request         *reqs,         /* OUT: MPI nonblocking recv+send request IDs */
@@ -1989,6 +2163,7 @@ static void ADIOI_LUSTRE_W_Exchange_data(
             int                 *error_code,   /* OUT: */
             SR_info             *send_infos,    /* OUT: send information */
             SR_info             *recv_infos,    /* OUT: receive information */
+            Non_contig_buf_sta  *nbs,
             Statistic           *stat_ptr)
 {
     char *buf_ptr, *contig_buf;
@@ -2154,15 +2329,11 @@ static void ADIOI_LUSTRE_W_Exchange_data(
          * at location given by buf_idx.
          */
         for (i = 0; i < cb_nodes; i++) {
-            // int dest = fd->hints->ranklist[i];
             if (send_size[i] && i != my_aggr_idx) {
 #ifdef WKL_DEBUG
 ADIOI_Assert(buf_idx[i] != -1);
 #endif
                 ADIOI_bs_agg_cache_sr_req(send_infos, send_size[i], (char *) buf + buf_idx[i], i, 1);
-                // MPI_Issend((char *) buf + buf_idx[i], send_size[i],
-                //            MPI_BYTE, dest, ADIOI_COLL_TAG(dest, iter),
-                //            fd->comm, &reqs[nsend++]);
             }
         }
     } else if (nprocs_send) {
@@ -2178,17 +2349,37 @@ ADIOI_Assert(buf_idx[i] != -1);
         for (i = 1; i < cb_nodes; i++)
             (*send_buf)[i] = (*send_buf)[i - 1] + send_size[i - 1];
 
-        ADIOI_LUSTRE_Fill_send_buffer(fd, buf, n_buftypes, flat_buf_idx,
-                                      flat_buf_sz, flat_buf, (*send_buf),
-                                      fileview_indx, offset_list, len_list,
-                                      total_send_size_iter, send_size, reqs, &nsend,
-                                      contig_access_count, my_aggr_idx, iter,
-                                      buftype_extent, send_infos);
-        /* MPI_Issend calls have been posted in ADIOI_Fill_send_buffer. It is
-         * possible nsend is 0.
-         * Send buffers must not be touched before MPI_Waitall() is completed,
-         * and thus send_buf will be freed in ADIOI_LUSTRE_Exch_and_write()
-         */
+        if (partition_group_size > 0) {
+            send_total_size = 0;
+            for (i = 0; i < cb_nodes; i++) {
+                send_total_size += send_size[i];
+                if ((i + 1) % fd->hints->striping_factor == 0) {
+                    if (send_total_size > 0) {
+                        int group_idx = i / fd->hints->striping_factor;
+                        Non_contig_buf_sta *ncbs = &nbs[group_idx];
+                        ADIOI_LUSTRE_Fill_send_buffer (
+                            fd, buf, &ncbs->n_buftypes, &ncbs->flat_buf_idx, &ncbs->flat_buf_sz,
+                            flat_buf, (*send_buf), &ncbs->fileview_indx, offset_list, len_list,
+                            send_total_size, send_size, reqs, &nsend, contig_access_count,
+                            my_aggr_idx, iter, buftype_extent, &ncbs->current_off,
+                            partition_group_size, min_st_loc, send_infos);
+                    }
+                    send_total_size = 0;
+                }
+            }
+        } else {
+            ADIO_Offset curr_offset = 0; // only used by partition_group_size > 0 case, place holder here.
+            ADIOI_LUSTRE_Fill_send_buffer (
+                fd, buf, n_buftypes, flat_buf_idx, flat_buf_sz, flat_buf, (*send_buf),
+                fileview_indx, offset_list, len_list, total_send_size_iter, send_size, reqs, &nsend,
+                contig_access_count, my_aggr_idx, iter, buftype_extent, &curr_offset,
+                partition_group_size, min_st_loc, send_infos);
+            /* MPI_Issend calls have been posted in ADIOI_Fill_send_buffer. It is
+             * possible nsend is 0.
+             * Send buffers must not be touched before MPI_Waitall() is completed,
+             * and thus send_buf will be freed in ADIOI_LUSTRE_Exch_and_write()
+             */
+         }
     }
     *nreqs += nsend;
 
@@ -2289,6 +2480,9 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
                                           int my_aggr_idx,
                                           int iter,
                                           ADIO_Offset buftype_extent,
+                                          ADIO_Offset *curr_off,
+                                          const ADIO_Offset partition_group_size,
+                                          const ADIO_Offset min_st_loc,
                                           SR_info *send_infos)
 {
     /* this function is only called if buftype is not contig */
@@ -2332,14 +2526,15 @@ int num_memcpy = 0;
      * For each contiguous off-len pair in this rank's file view, pack write
      * data into send buffers, send_buf[].
      */
+
     for (ii = *fileview_indx; ii < contig_access_count; ii++) {
-        off = offset_list[ii];
-        rem_len = len_list[ii];
+        off = offset_list[ii] + (*curr_off);
+        rem_len = len_list[ii] - (*curr_off);
 
         /* this off-len request may span to more than one I/O aggregator */
         while (rem_len != 0) {
             len = rem_len;
-            q = ADIOI_LUSTRE_Calc_aggregator(fd, off, &len);
+            q = ADIOI_LUSTRE_Calc_aggregator(fd, off, &len, partition_group_size, min_st_loc);
             /* NOTE: len will be modified by ADIOI_Calc_aggregator() to be no
              * more than a file stripe unit size that aggregator "q" is
              * responsible for. Note q is not the MPI rank ID, It is the array
@@ -2378,17 +2573,12 @@ int num_memcpy = 0;
 
                 if (q != my_aggr_idx) { /* send only if not self rank */
                     /* get the aggregator's MPI rank ID */
-                    // int dest = fd->hints->ranklist[q];
                     if (isUserBuf) {
                         ADIOI_bs_agg_cache_sr_req(send_infos, send_size[q], same_buf_ptr, q, 1);
                     }
-                        // MPI_Issend(same_buf_ptr, send_size[q], MPI_BYTE, dest,
-                        //            ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
                     else {
                         ADIOI_bs_agg_cache_sr_req(send_infos, send_size[q], send_buf[q], q, 1);
                     }
-                        // MPI_Issend(send_buf[q], send_size[q], MPI_BYTE, dest,
-                        //            ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
                 }
                 else if (isUserBuf) { /* send buffer is also (part of) buf */
                     /* send to self and user buf is contiguous, then make a
@@ -2400,11 +2590,11 @@ int num_memcpy = 0;
             /* len is the amount of data copied */
             off += len;
             rem_len -= len;
-            offset_list[ii] += len;
-            len_list[ii] -= len;
+            *curr_off += len;
             total_send_size_iter -= len;
             if (total_send_size_iter == 0) goto done;
         }
+        *curr_off = 0;
     }
 done:
     *n_send_reqs = jj;

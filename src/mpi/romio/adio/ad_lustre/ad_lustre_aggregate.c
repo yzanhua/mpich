@@ -87,8 +87,11 @@ void ADIOI_LUSTRE_Get_striping_info(ADIO_File fd, int *striping_info, int mode)
     striping_info[2] = avail_cb_nodes;
 }
 
-int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * len)
-{
+int ADIOI_LUSTRE_Calc_aggregator (ADIO_File fd,
+                                  ADIO_Offset off,
+                                  ADIO_Offset *len,
+                                  const ADIO_Offset partition_group_size,
+                                  const ADIO_Offset min_st_loc) {
     ADIO_Offset avail_bytes, stripe_id;
 
     stripe_id = off / fd->hints->striping_unit;
@@ -100,7 +103,15 @@ int ADIOI_LUSTRE_Calc_aggregator(ADIO_File fd, ADIO_Offset off, ADIO_Offset * le
         *len = avail_bytes;
     }
     /* return the index to ranklist[] */
-    return (stripe_id % fd->hints->cb_nodes);
+    if (partition_group_size <= 0) {
+        return stripe_id % fd->hints->cb_nodes;
+    }
+
+
+    stripe_id = stripe_id - (min_st_loc / fd->hints->striping_unit);
+    ADIO_Offset group_idx = stripe_id / partition_group_size;
+    ADIO_Offset id_in_group = stripe_id % fd->hints->striping_factor;
+    return group_idx * fd->hints->striping_factor + id_in_group;
 }
 
 int ADIOI_LUSTRE_Docollect(ADIO_File fd, int contig_access_count,
