@@ -2603,6 +2603,10 @@ int num_memcpy = 0;
             /* len is the amount of data copied */
             off += len;
             rem_len -= len;
+            if (partition_group_size < 0) {
+                offset_list[ii] += len;
+                len_list[ii] -= len;
+            }
             *curr_off += len;
             total_send_size_iter -= len;
             if (total_send_size_iter == 0) goto done;
