@@ -1919,8 +1919,12 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
 
                 /* lock ahead the file starting from real_off */
                 ADIOI_LUSTRE_WR_LOCK_AHEAD(fd, cb_nodes, real_off, error_code);
-                if (*error_code != MPI_SUCCESS)
+                if (*error_code != MPI_SUCCESS) {
+                    if (myrank == 0) {
+                        printf("DEBUG, error lock ahead, real_off=%lld, m=%d, min=%lld\n", real_off, m, min_st_loc);
+                    }
                     goto over;
+                }
 
                 /* When srt_off_len[j].num == 1, either there is no hole in the
                  * write buffer or the file domain has been read into write
@@ -1952,8 +1956,12 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                      srt_off_len[j].off[i],
                                      &status, error_code);
                     stat_ptr->io_time += MPI_Wtime();
-                    if (*error_code != MPI_SUCCESS)
+                    if (*error_code != MPI_SUCCESS) {
+                        if (myrank == 0) {
+                            printf("DEBUG, error ADIO_WriteContig, m=%d\n", m);
+                        }
                         goto over;
+                    }
                 }
                 if (srt_off_len[j].num > 0) {
                     ADIOI_Free(srt_off_len[j].off);
