@@ -1259,9 +1259,17 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
                 MPI_Type_create_hindexed (recv_infos[i].count, recv_infos[i].size_ptr,
                                           recv_infos[i].buf_pos_ptr, MPI_BYTE, &newtype);
                 MPI_Type_commit (&newtype);
-                MPI_Irecv (MPI_BOTTOM, 1, newtype, i, ADIOI_COLL_TAG (dest, iter), fd->comm,
-                           &reqs[reqs_count]);
-                reqs_count++;
+                if (fd->atomicity) {
+                    // MPI_Recv(contig_buf, recv_size[i], MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, &status);
+                    // MEMCPY_UNPACK(i, contig_buf, start_pos, recv_count, write_buf);
+                    MPI_Status status;
+                    // Blocking Recv, no increment to reqs_count
+                    MPI_Recv(MPI_BOTTOM, 1, newtype, i, ADIOI_COLL_TAG (dest, iter), fd->comm, &status);
+                } else {
+                    MPI_Irecv (MPI_BOTTOM, 1, newtype, i, ADIOI_COLL_TAG (dest, iter), fd->comm,
+                               &reqs[reqs_count]);
+                    reqs_count++;
+                }
                 MPI_Type_free (&newtype);
             }
         }
@@ -1364,7 +1372,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     stat_ptr->rounds = ntimes;
     int num_nodes = nprocs / stat_ptr->num_procs_per_node;
     if (fd->is_agg) {
-        // ADIOI_Calloc((nprocs + 2 * cb_nodes), sizeof(int));
         stat_ptr->num_message_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
         stat_ptr->num_sender_processes_per_round_per_agg = (int *) ADIOI_Calloc(ntimes, sizeof(int));
         stat_ptr->num_sender_nodes_per_round_per_agg = (int *) ADIOI_Calloc(ntimes * num_nodes, sizeof(int));
@@ -1700,7 +1707,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
              * nonblocking sends are waited at the end of each round. So,
              * nreqs should be 0 for all ranks.
              */
-            if (fd->atomicity) assert(batch_nreqs == 0);
+            // if (fd->atomicity) assert(batch_nreqs == 0);
 
             /* free send_buf allocated in ADIOI_LUSTRE_W_Exchange_data() */
             for (j=0; j<numBufs; j++) {
@@ -2118,38 +2125,32 @@ static void ADIOI_LUSTRE_W_Exchange_data(
     /* nrecv/nsend is the number of Issend/Irecv to be posted */
     int nrecv = 0, nsend = 0;
 
-    if (!fd->atomicity) {
-        /* post receives and receive messages into contig_buf, a temporary
-         * buffer */
-        buf_ptr = contig_buf;
-        for (i = 0; i < nprocs; i++) {
-            if (recv_size[i] == 0)
-                continue;
-            if (i != myrank) {
-                if (recv_count[i] > 1) {
-                    ADIOI_bs_agg_cache_sr_req(recv_infos, recv_size[i], buf_ptr, i, 0);
-                    buf_ptr += recv_size[i];
-                } else {
-                    /* recv_count[i] is the number of noncontiguous
-                     * offset-length pairs describing the write requests of
-                     * process i that fall into this aggregator's file domain.
-                     * When recv_count[i] is 1, there is only one such pair,
-                     * meaning the receive message is to be stored
-                     * contiguously. Such message can be received directly into
-                     * write_buf.
-                     */
-                    ADIOI_bs_agg_cache_sr_req(recv_infos, recv_size[i], write_buf + others_req[i].mem_ptrs[start_pos[i]], i, 0);
-                    // MPI_Irecv(write_buf + others_req[i].mem_ptrs[start_pos[i]], recv_size[i],
-                    //           MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm,
-                    //           &reqs[nrecv++]);
-                }
-            } else if (buftype_is_contig && recv_count[i] > 0) {
-                /* send/recv to/from self uses memcpy()
-                 * buftype_is_contig == 0 is handled at the send time below.
+    /* post receives and receive messages into contig_buf, a temporary buffer */
+    buf_ptr = contig_buf;
+    for (i = 0; i < nprocs; i++) {
+        if (recv_size[i] == 0)
+            continue;
+        if (i != myrank) {
+            if (recv_count[i] > 1) {
+                ADIOI_bs_agg_cache_sr_req(recv_infos, recv_size[i], buf_ptr, i, 0);
+                buf_ptr += recv_size[i];
+            } else {
+                /* recv_count[i] is the number of noncontiguous
+                 * offset-length pairs describing the write requests of
+                 * process i that fall into this aggregator's file domain.
+                 * When recv_count[i] is 1, there is only one such pair,
+                 * meaning the receive message is to be stored
+                 * contiguously. Such message can be received directly into
+                 * write_buf.
                  */
-                char *fromBuf = (char *) buf + buf_idx[my_aggr_idx];
-                MEMCPY_UNPACK(i, fromBuf, start_pos, recv_count, write_buf);
+                ADIOI_bs_agg_cache_sr_req(recv_infos, recv_size[i], write_buf + others_req[i].mem_ptrs[start_pos[i]], i, 0);
             }
+        } else if (buftype_is_contig && recv_count[i] > 0) {
+            /* send/recv to/from self uses memcpy()
+             * buftype_is_contig == 0 is handled at the send time below.
+             */
+            char *fromBuf = (char *) buf + buf_idx[my_aggr_idx];
+            MEMCPY_UNPACK(i, fromBuf, start_pos, recv_count, write_buf);
         }
     }
     *nreqs = nrecv;
@@ -2194,32 +2195,7 @@ ADIOI_Assert(buf_idx[i] != -1);
     }
     *nreqs += nsend;
 
-    if (fd->atomicity) {
-        /* In atomic mode, we must receive write data in the increasing order
-         * of MPI process rank IDs,
-         */
-        for (i = 0; i < nprocs; i++) {
-            if (recv_size[i] == 0)
-                continue;
-            if (i != myrank) {
-                MPI_Recv(contig_buf, recv_size[i], MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm, &status);
-                MEMCPY_UNPACK(i, contig_buf, start_pos, recv_count, write_buf);
-            } else if (recv_count[i] > 0) {
-                /* send/recv to/from self uses memcpy() */
-                char *ptr = (*send_buf)[my_aggr_idx];
-                if (buftype_is_contig)
-                    ptr = (char *) buf + buf_idx[my_aggr_idx];
-                MEMCPY_UNPACK(i, ptr, start_pos, recv_count, write_buf);
-            }
-        }
-        if (nsend > 0) {
-            stat_ptr->wait_time -= MPI_Wtime();
-            AD_LUSTRE_WAITALL(nsend, reqs);
-            stat_ptr->wait_time -= MPI_Wtime();
-        }
-        *nreqs = 0;
-
-    } else if (!buftype_is_contig) {
+    if (!buftype_is_contig) {
         if (my_aggr_idx >= 0 && send_size[my_aggr_idx] > 0)
             /* contents of user buf that must be sent to self has been copied
              * into send_buf[my_aggr_idx]. Now unpack it into write_buf.
