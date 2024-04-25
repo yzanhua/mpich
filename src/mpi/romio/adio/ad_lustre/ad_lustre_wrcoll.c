@@ -75,8 +75,8 @@ typedef struct {
     size_t* send_size_per_round;
     int* num_sender_processes_per_round_per_agg;
     int* num_sender_nodes_per_round_per_agg;
-    int num_wait_all_group;
-    int* num_wait_all_per_group;
+    int num_wait_all;
+    int num_reqs;
     int use_ind_io;
     int use_one_side_io;
     int num_procs_per_node;
@@ -680,8 +680,8 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     // double max_two_phase_total = -1.0, max_io_phase_time=-1.0, max_comm_phase_time=-1.0;
     stat_ptr->comm_time = stat_ptr->total_two_phase_time - stat_ptr->io_time;
     int num_nodes = nprocs / stat_ptr->num_procs_per_node;
-    size_t struct_size = sizeof(double) * 4 + sizeof(int) * 3;
-    struct_size += stat_ptr->rounds * sizeof(int) * 4;
+    size_t struct_size = sizeof(double) * 4 + sizeof(int) * 4;
+    struct_size += stat_ptr->rounds * sizeof(int) * 3;
     struct_size += stat_ptr->rounds * num_nodes * sizeof(int);
     struct_size += stat_ptr->rounds * sizeof(size_t);
 
@@ -692,22 +692,21 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     ((double*) send_buf)[3] = stat_ptr->wait_time;
     int* int_buf = (int*)((double*) send_buf + 4);
     int_buf[0] = stat_ptr->num_message_per_agg;
-    int_buf[1] = stat_ptr->num_wait_all_group;
+    int_buf[1] = stat_ptr->num_wait_all;
     int_buf[2] = fd->is_agg;
-    int* array_buf1 = (int*)(int_buf + 3);
+    int_buf[3] = stat_ptr->num_reqs;
+    int* array_buf1 = (int*)(int_buf + 4);
     int* array_buf2 = array_buf1 + stat_ptr->rounds;
     int* array_buf3 = array_buf2 + stat_ptr->rounds;
     int* array_buf4 = array_buf3 + stat_ptr->rounds;
-    int* array_buf5 = array_buf4 + stat_ptr->rounds * num_nodes;
     if (fd->is_agg){
         memcpy(array_buf1, stat_ptr->num_message_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf3, stat_ptr->num_sender_processes_per_round_per_agg, stat_ptr->rounds * sizeof(int));
         memcpy(array_buf4, stat_ptr->num_sender_nodes_per_round_per_agg, stat_ptr->rounds * num_nodes * sizeof(int));
     }
     memcpy(array_buf2, stat_ptr->num_receiver_per_round, stat_ptr->rounds * sizeof(int));
-    memcpy(array_buf5, stat_ptr->num_wait_all_per_group, stat_ptr->rounds * sizeof(int));
 
-    size_t* array_buf6 = (size_t*)(array_buf5 + stat_ptr->rounds);
+    size_t* array_buf6 = (size_t*)(array_buf4 + stat_ptr->rounds * num_nodes);
     memcpy(array_buf6, stat_ptr->send_size_per_round, stat_ptr->rounds * sizeof(size_t));
 
     char* recv_buf = NULL;
@@ -769,7 +768,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             printf("\tnum_message_per_agg: %d//\n", min_val_int);
         }
 
-        // num_wait_all_group (agg)
+        // num_wait_all_calls (agg)
         min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
         for (int i = 0; i < nprocs; i++) {
             int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
@@ -781,18 +780,25 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
                 cnt++;
             }
         }
-        if (min_val_int != max_val_int) {
-            printf("\tnum_wait_all_calls (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
-        } else {
-            printf("\tnum_wait_all_calls (agg): %d//\n", min_val_int);
+        printf("\tnum_wait_all_calls (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
+
+        // num_reqs (agg)
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
+            int is_agg = int_recv_ptr[2];
+            if (is_agg) {
+                if (int_recv_ptr[1] < min_val_int) min_val_int = int_recv_ptr[3];
+                if (int_recv_ptr[1] > max_val_int) max_val_int = int_recv_ptr[3];
+                total_val_int += int_recv_ptr[3];
+                cnt++;
+            }
         }
+        printf("\tnum_reqs (agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
 
-        if (max_val_int > 0)
-            print_across_proc("\t\tnum_reqs_per_wait_all (agg): ", min_val_int, nprocs, 1, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1, num_nodes);
-        print_across_proc("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 0, stat_ptr, 1, num_nodes);
-        print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 2, stat_ptr, 1, num_nodes);
+        print_across_proc("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 4, 0, stat_ptr, 1, num_nodes);
+        print_across_proc("\tnum_sender_processes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 4, 2, stat_ptr, 1, num_nodes);
 
-        // print_across_proc("\tnum_sender_nodes_per_round_per_agg: ", stat_ptr->rounds, nprocs, 1, recv_buf, struct_size, 4, 3, 3, stat_ptr, 1, num_nodes);
         int *temp_array_nodes = (int*) malloc(num_nodes * sizeof(int));
         int *temp_array_rounds = (int*) malloc(stat_ptr->rounds * sizeof(int));
         for (int j = 0; j < stat_ptr->rounds; j++) {
@@ -835,15 +841,24 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
                 cnt++;
             }
         }
-        if (min_val_int != max_val_int) {
-            printf("\tnum_wait_all_calls (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
-        } else {
-            printf("\tnum_wait_all_calls (non agg): %d//\n", min_val_int);
+        printf("\tnum_wait_all_calls (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
+
+        // num_reqs (non agg)
+        min_val_int = INT_MAX, max_val_int = -1, total_val_int = 0, cnt = 0;
+        for (int i = 0; i < nprocs; i++) {
+            int* int_recv_ptr = (int*)(recv_buf + i * struct_size + sizeof(double) * 4);
+            int is_agg = int_recv_ptr[2];
+            if (!is_agg) {
+                if (int_recv_ptr[1] < min_val_int) min_val_int = int_recv_ptr[3];
+                if (int_recv_ptr[1] > max_val_int) max_val_int = int_recv_ptr[3];
+                total_val_int += int_recv_ptr[3];
+                cnt++;
+            }
         }
-        if (max_val_int > 0)
-            print_across_proc("\t\tnum_reqs_per_wait_all (non agg): ", min_val_int, nprocs, 0, recv_buf, struct_size, 4, 3, 4, stat_ptr, 1, num_nodes);
-        print_across_proc("all processes counters\n\tnum_receiver_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 1, stat_ptr, 1, num_nodes);
-        print_across_proc("\tsend_size_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 3, 5, stat_ptr, 0, num_nodes);
+        printf("\tnum_reqs (non agg): %d/%d/%d/%.2f\n", min_val_int, max_val_int, total_val_int, (double) total_val_int / cnt);
+
+        print_across_proc("all processes counters\n\tnum_receiver_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 4, 1, stat_ptr, 1, num_nodes);
+        print_across_proc("\tsend_size_per_round: ", stat_ptr->rounds, nprocs, -1, recv_buf, struct_size, 4, 4, 4, stat_ptr, 0, num_nodes);
         int agg_printed = 0;
         int non_agg_printed = 0;
 
@@ -863,18 +878,18 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
                 continue;
             }
 
-            int* array_recv_ptr1 = int_recv_ptr + 3;
+            int* array_recv_ptr1 = int_recv_ptr + 4;
             int* array_recv_ptr2 = array_recv_ptr1 + stat_ptr->rounds;
             int* array_recv_ptr3 = array_recv_ptr2 + stat_ptr->rounds;
             int* array_recv_ptr4 = array_recv_ptr3 + stat_ptr->rounds;
-            int* array_recv_ptr5 = array_recv_ptr4 + stat_ptr->rounds * num_nodes;
-            size_t* array_recv_ptr6 = (size_t*)(array_recv_ptr5 + stat_ptr->rounds);
+            size_t* array_recv_ptr6 = (size_t*)(array_recv_ptr4 + stat_ptr->rounds);
             printf("-- proc %d\n", i);
             printf("\ttotal_two_phase_time: %f\n", recv_ptr[0]);
             printf("\tio_time: %f\n", recv_ptr[1]);
             printf("\tcomm_time: %f\n", recv_ptr[2]);
             printf("\tnum_message_per_agg: %d\n", int_recv_ptr[0]);
             printf("\tnum_wait_all_calls: %d\n", int_recv_ptr[1]);
+            printf("\tnum_reqs: %d\n", int_recv_ptr[3]);
             printf("\tis_agg: %d\n", int_recv_ptr[2]);
             if (int_recv_ptr[2]) {
                 print_array("\tnum_message_per_round_per_agg: ", stat_ptr->rounds, array_recv_ptr1, NULL);
@@ -904,9 +919,6 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
     }
     if (stat_ptr->num_sender_nodes_per_round_per_agg != NULL) {
         ADIOI_Free(stat_ptr->num_sender_nodes_per_round_per_agg);
-    }
-    if (stat_ptr->num_wait_all_per_group != NULL) {
-        ADIOI_Free(stat_ptr->num_wait_all_per_group);
     }
 }
 
@@ -943,8 +955,8 @@ void ADIOI_LUSTRE_WriteStridedColl(ADIO_File fd, const void *buf, MPI_Aint count
                       .send_size_per_round                    = NULL,
                       .num_sender_processes_per_round_per_agg = NULL,
                       .num_sender_nodes_per_round_per_agg     = NULL,
-                      .num_wait_all_group                     = 0,
-                      .num_wait_all_per_group                 = NULL,
+                      .num_wait_all                           = 0,
+                      .num_reqs                               = 0,
                       .use_ind_io                             = 0,
                       .use_one_side_io                        = 0,
                       .num_procs_per_node                     = 128};
@@ -1260,8 +1272,8 @@ static void ADIOI_post_send_recv_reqs_wait (ADIO_File fd,
         stat_ptr->wait_time -= MPI_Wtime ();
         AD_LUSTRE_WAITALL (reqs_count, reqs);
         stat_ptr->wait_time += MPI_Wtime ();
-        stat_ptr->num_wait_all_per_group[stat_ptr->num_wait_all_group] = reqs_count;
-        stat_ptr->num_wait_all_group++;
+        stat_ptr->num_reqs += reqs_count;
+        stat_ptr->num_wait_all++;
     }
 
     // clear send_infos, recv_infos
@@ -1359,7 +1371,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     }
     stat_ptr->num_receiver_per_round = (int *) ADIOI_Calloc(ntimes, sizeof(int));
     stat_ptr->send_size_per_round = (size_t *) ADIOI_Calloc(ntimes, sizeof(size_t));
-    stat_ptr->num_wait_all_per_group = (int *) ADIOI_Calloc(ntimes, sizeof(int));
 
     /* off_list[m] is the starting file offset of this process's write region
      * in iteration m (file domain of iteration m). This offset may not be
@@ -1818,7 +1829,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
         ADIOI_Free(send_infos);
     }
     if (recv_infos != NULL) {
-        for (i = 0; i < cb_nodes; i++) {
+        for (i = 0; i < nprocs; i++) {
             ADIOI_Free(recv_infos[i].size_ptr);
             ADIOI_Free(recv_infos[i].buf_pos_ptr);
         }
@@ -1949,9 +1960,6 @@ void heap_merge(const ADIOI_Access * others_req, const int *count, ADIO_Offset *
 }
 static void ADIOI_bs_agg_cache_sr_req(SR_info *sr_infos, int size, void* buf, int target_proc, int is_send) {
     int idx = sr_infos[target_proc].count;
-    // int myrank;
-    // MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
-    // printf("DEBUG %d is_send=%d target_proc=%d idx=%d, size_ptr=%p\n", myrank, is_send, target_proc, idx, sr_infos[target_proc].size_ptr);
     sr_infos[target_proc].size_ptr[idx] = size;
     MPI_Get_address(buf, &(sr_infos[target_proc].buf_pos_ptr[idx]));
     sr_infos[target_proc].count++;
@@ -2120,8 +2128,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
             if (i != myrank) {
                 if (recv_count[i] > 1) {
                     ADIOI_bs_agg_cache_sr_req(recv_infos, recv_size[i], buf_ptr, i, 0);
-                    // MPI_Irecv(buf_ptr, recv_size[i], MPI_BYTE, i, ADIOI_COLL_TAG(i, iter), fd->comm,
-                    //           &reqs[nrecv++]);
                     buf_ptr += recv_size[i];
                 } else {
                     /* recv_count[i] is the number of noncontiguous
@@ -2154,15 +2160,11 @@ static void ADIOI_LUSTRE_W_Exchange_data(
          * at location given by buf_idx.
          */
         for (i = 0; i < cb_nodes; i++) {
-            // int dest = fd->hints->ranklist[i];
             if (send_size[i] && i != my_aggr_idx) {
 #ifdef WKL_DEBUG
 ADIOI_Assert(buf_idx[i] != -1);
 #endif
                 ADIOI_bs_agg_cache_sr_req(send_infos, send_size[i], (char *) buf + buf_idx[i], i, 1);
-                // MPI_Issend((char *) buf + buf_idx[i], send_size[i],
-                //            MPI_BYTE, dest, ADIOI_COLL_TAG(dest, iter),
-                //            fd->comm, &reqs[nsend++]);
             }
         }
     } else if (nprocs_send) {
@@ -2378,17 +2380,12 @@ int num_memcpy = 0;
 
                 if (q != my_aggr_idx) { /* send only if not self rank */
                     /* get the aggregator's MPI rank ID */
-                    // int dest = fd->hints->ranklist[q];
                     if (isUserBuf) {
                         ADIOI_bs_agg_cache_sr_req(send_infos, send_size[q], same_buf_ptr, q, 1);
                     }
-                        // MPI_Issend(same_buf_ptr, send_size[q], MPI_BYTE, dest,
-                        //            ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
                     else {
                         ADIOI_bs_agg_cache_sr_req(send_infos, send_size[q], send_buf[q], q, 1);
                     }
-                        // MPI_Issend(send_buf[q], send_size[q], MPI_BYTE, dest,
-                        //            ADIOI_COLL_TAG(dest, iter), fd->comm, &send_reqs[jj++]);
                 }
                 else if (isUserBuf) { /* send buffer is also (part of) buf */
                     /* send to self and user buf is contiguous, then make a
