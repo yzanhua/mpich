@@ -882,7 +882,7 @@ static void post_process_statistics(Statistic* stat_ptr, int myrank, int nprocs,
             int* array_recv_ptr2 = array_recv_ptr1 + stat_ptr->rounds;
             int* array_recv_ptr3 = array_recv_ptr2 + stat_ptr->rounds;
             int* array_recv_ptr4 = array_recv_ptr3 + stat_ptr->rounds;
-            size_t* array_recv_ptr6 = (size_t*)(array_recv_ptr4 + stat_ptr->rounds);
+            size_t* array_recv_ptr6 = (size_t*)(array_recv_ptr4 + stat_ptr->rounds * num_nodes);
             printf("-- proc %d\n", i);
             printf("\ttotal_two_phase_time: %f\n", recv_ptr[0]);
             printf("\tio_time: %f\n", recv_ptr[1]);
