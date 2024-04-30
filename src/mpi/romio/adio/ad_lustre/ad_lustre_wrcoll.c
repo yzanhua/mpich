@@ -77,8 +77,6 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd, const void *buf,
                                           ADIO_Offset * len_list,
                                           ADIO_Offset total_send_size_iter,
                                           const int *send_size,
-                                          MPI_Request *send_reqs,
-                                          int *n_send_reqs,
                                           int contig_access_count,
                                           int my_aggr_idx,
                                           int iter,
@@ -109,8 +107,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(ADIO_File fd, const void *buf,
                                          ADIO_Offset buftype_extent,
                                          const ADIO_Offset * buf_idx,
                                          off_len_list *srt_off_len,
-                                         MPI_Request *reqs,
-                                         int *n_reqs,
                                          SR_info *send_infos,
                                          SR_info *recv_infos,
                                          int *error_code);
@@ -907,7 +903,7 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     int *recv_curr_offlen_ptr, **recv_size=NULL, **recv_count=NULL;
     int **recv_start_pos=NULL;
     int *send_curr_offlen_ptr, *send_size;
-    int batch_idx, *nreqs, batch_nreqs, cb_nodes, striping_unit;
+    int batch_idx = 0, cb_nodes, striping_unit;
     ADIO_Offset end_loc, req_off, iter_end_off, *off_list, step_size;
     ADIO_Offset *this_buf_idx, buftype_extent;
     off_len_list *srt_off_len = NULL;
@@ -1087,28 +1083,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
 
     srt_off_len = (off_len_list*) ADIOI_Malloc(nbufs * sizeof(off_len_list));
 
-    /* upper bound numbers of send and receive */
-    int n_send_recv_ub = 0;
-    for (i = 0; i < cb_nodes; i++) {
-        /* my_req[] is an array of nprocs access structures, one for each
-         * aggregator whose file domain has this process's request */
-        if (my_req[i].count && i != my_aggr_idx)
-            n_send_recv_ub++;
-    }
-    for (i = 0; i < nprocs; i++) {
-        /* others_req[] is an array of nprocs access structures, one for each
-         * other process whose requests fall into this process's file domain,
-         * i.e. is written by this process. */
-        if (others_req[i].count && i != myrank)
-            n_send_recv_ub++;
-    }
-    n_send_recv_ub *= nbufs;
-
-    MPI_Request *reqs;
-    reqs = (MPI_Request *) ADIOI_Malloc(n_send_recv_ub * sizeof(MPI_Request));
-    batch_idx = batch_nreqs = 0;
-    nreqs = (int*) ADIOI_Malloc(nbufs * sizeof(int));
-
     int ibuf = 0;
     int fileview_indx = 0;
     int n_buftypes = 0;
@@ -1225,8 +1199,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                                      buftype_extent,
                                      this_buf_idx,         /* IN: changed each round */
                                      &srt_off_len[ibuf],   /* OUT: list of write request off-len pairs */
-                                     reqs + batch_nreqs,   /* OUT: nonblocking recv+send request IDs */
-                                     &nreqs[ibuf],         /* OUT: number of recv+send request IDs */
                                      send_infos,           /* OUT: cached send reqs info */
                                      recv_infos,           /* OUT: cached recv reqs info */
                                      error_code);
@@ -1236,9 +1208,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
 
         /* rbuf might be realloc-ed */
         if (recv_buf != NULL) recv_buf[ibuf] = rbuf;
-
-        /* accumulate nreqs across nbufs rounds */
-        batch_nreqs += nreqs[ibuf];
 
         /* commit writes for this batch of numBufs */
         if (m % nbufs == nbufs - 1 || m == ntimes - 1) {
@@ -1256,8 +1225,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
                     send_buf[j] = NULL;
                 }
             }
-
-            batch_nreqs = 0;
 
             if (!fd->is_agg) /* non-aggregators are done for this batch */
                 continue;    /* next run of loop m */
@@ -1342,8 +1309,6 @@ static void ADIOI_LUSTRE_Exch_and_write(ADIO_File fd,
     }
 
   over:
-    ADIOI_Free(reqs);
-    ADIOI_Free(nreqs);
     if (srt_off_len)
         ADIOI_Free(srt_off_len);
     if (write_buf != NULL) {
@@ -1544,8 +1509,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
             ADIO_Offset          buftype_extent,
       const ADIO_Offset         *buf_idx,      /* indices to user buffer for sending this rank's write data to aggregator i */
             off_len_list        *srt_off_len,  /* OUT: list of writes by this rank in this round */
-            MPI_Request         *reqs,         /* OUT: MPI nonblocking recv+send request IDs */
-            int                 *nreqs,        /* OUT: number of nonblocking recv+send posted */
             SR_info             *send_infos,   /* OUT: updated cached send reqs */
             SR_info             *recv_infos,   /* OUT: updated cached recv reqs */
             int                 *error_code)   /* OUT: */
@@ -1666,9 +1629,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
         *recv_buf = (char *) ADIOI_Realloc(*recv_buf, sum_recv);
     contig_buf = *recv_buf;
 
-    /* nrecv/nsend is the number of Issend/Irecv to be posted */
-    int nrecv = 0, nsend = 0;
-
     /* post receives and receive messages into contig_buf, a temporary buffer */
     buf_ptr = contig_buf;
     for (i = 0; i < nprocs; i++) {
@@ -1699,9 +1659,6 @@ static void ADIOI_LUSTRE_W_Exchange_data(
         }
     }
 
-    *nreqs = nrecv;
-    reqs += nrecv;
-
     if (buftype_is_contig) {
         /* If buftype_is_contig, data can be directly sent from user buf
          * at location given by buf_idx.
@@ -1730,7 +1687,7 @@ ADIOI_Assert(buf_idx[i] != -1);
         ADIOI_LUSTRE_Fill_send_buffer(fd, buf, n_buftypes, flat_buf_idx,
                                       flat_buf_sz, flat_buf, (*send_buf),
                                       fileview_indx, offset_list, len_list,
-                                      total_send_size_iter, send_size, reqs, &nsend,
+                                      total_send_size_iter, send_size,
                                       contig_access_count, my_aggr_idx, iter,
                                       buftype_extent, send_infos);
         /* MPI_Issend calls have been posted in ADIOI_Fill_send_buffer. It is
@@ -1739,7 +1696,6 @@ ADIOI_Assert(buf_idx[i] != -1);
          * and thus send_buf will be freed in ADIOI_LUSTRE_Exch_and_write()
          */
     }
-    *nreqs += nsend;
 
     if (!buftype_is_contig) {
         if (my_aggr_idx >= 0 && send_size[my_aggr_idx] > 0)
@@ -1807,8 +1763,6 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
                                           ADIO_Offset *len_list,
                                           ADIO_Offset total_send_size_iter,
                                           const int *send_size,
-                                          MPI_Request *send_reqs,
-                                          int *n_send_reqs, /* number of issend posted */
                                           int contig_access_count,
                                           int my_aggr_idx,
                                           int iter,
@@ -1816,12 +1770,10 @@ static void ADIOI_LUSTRE_Fill_send_buffer(ADIO_File fd,
                                           SR_info *send_infos)
 {
     /* this function is only called if buftype is not contig */
-    int ii, jj, q, size, send_size_rem=0;
+    int ii, q, size, send_size_rem=0;
     int first_q=-1, copy_size_delayed, isUserBuf;
     char *user_buf_ptr, *send_buf_ptr, *same_buf_ptr;
     ADIO_Offset off, len, rem_len, user_buf_idx;
-
-    jj = 0;
 
     /* user_buf_idx is to the index offset to buf, indicating the starting
      * location to be copied..
@@ -1924,8 +1876,6 @@ int num_memcpy = 0;
         }
     }
 done:
-    *n_send_reqs = jj;
-
     if (len_list[ii] == 0) ii++;
     *fileview_indx = ii;
 
